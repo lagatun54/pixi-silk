@@ -2,6 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { type Control, type Demo, initialValues, type MountedDemo, mountDemo } from '@/demos/runtime';
 
 // one lazily loaded chunk per demo
+/** Import failures after a deploy: the page asks for script files that no longer exist. */
+const STALE =
+    /Importing a module script failed|Failed to fetch dynamically imported module|error loading dynamically imported module/i;
+
 const modules = import.meta.glob<{ default: Demo }>('../../demos/*.demo.ts');
 
 interface Props {
@@ -41,7 +45,10 @@ export default function DemoRunner({ name, height = 280, label }: Props) {
                 setParams(values.current);
                 setDemo(m.default);
             },
-            (e: unknown) => setError(String(e)),
+            // a script from before the last deploy: reload once (Base.astro), otherwise show the error
+            (e: unknown) => {
+                if (!window.silkRecover?.(e)) setError(String(e));
+            },
         );
     }, [name]);
 
@@ -110,8 +117,23 @@ export default function DemoRunner({ name, height = 280, label }: Props) {
                     </div>
                 )}
                 {error && (
-                    <div className="absolute inset-0 flex items-center justify-center p-4 font-mono text-xs text-red-400">
-                        {error}
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-4 text-center font-mono text-xs text-red-400">
+                        {STALE.test(error) ? (
+                            <>
+                                <span className="text-white/60">
+                                    The site was updated. Reload the page to run this demo.
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={() => location.reload()}
+                                    className="rounded-md border border-white/20 px-3 py-1.5 text-white/80 hover:bg-white/10"
+                                >
+                                    Reload
+                                </button>
+                            </>
+                        ) : (
+                            error
+                        )}
                     </div>
                 )}
             </div>

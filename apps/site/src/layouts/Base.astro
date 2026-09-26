@@ -28,6 +28,24 @@ const {
             // dark unless the visitor chose light: set before first paint so nothing flashes
             document.documentElement.classList.toggle('dark', localStorage.getItem('theme') !== 'light');
         </script>
+        {/* A deploy replaces the hashed script files, so a page loaded before it can fail to import them
+            (the host then answers with HTML). Reload once to get the new page; the flag stops loops. */}
+        <script is:inline>
+            window.silkRecover = (error) => {
+                const stale = /Importing a module script failed|Failed to fetch dynamically imported module|error loading dynamically imported module|Unable to preload CSS/i;
+                if (!stale.test(String(error?.message ?? error))) return false;
+                try {
+                    if (sessionStorage.getItem('silk-reloaded') === location.pathname) return false;
+                    sessionStorage.setItem('silk-reloaded', location.pathname);
+                } catch {
+                    return false;
+                }
+                location.reload();
+                return true;
+            };
+            addEventListener('unhandledrejection', (e) => { if (window.silkRecover(e.reason)) e.preventDefault(); });
+            addEventListener('vite:preloadError', (e) => { if (window.silkRecover(e.payload)) e.preventDefault(); });
+        </script>
         {/* Some static hosts (Timeweb's frontend apps) answer unknown URLs with the home page.
             Send those visitors to the real 404 page, which is noindex. */}
         {path === '/' && (
