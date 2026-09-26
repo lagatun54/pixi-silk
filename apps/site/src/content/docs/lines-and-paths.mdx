@@ -1,0 +1,61 @@
+---
+title: Lines & paths
+eyebrow: Drawing
+seoTitle: 'Smooth lines, polylines and tapered strokes in PixiJS'
+description: 'Anti-aliased lines and polylines with monotone or Catmull-Rom smoothing, Bezier paths, tapered strokes and translucent joints without double blending.'
+keywords: ['smooth lines PixiJS', 'PixiJS polyline', 'anti-aliased lines WebGL', 'tapered stroke', 'bezier curve PixiJS']
+updated: 2026-09-26
+api: [SilkGraphics, along]
+---
+
+<Demo name="polyline" height={240} />
+
+## Lines and polylines
+
+```ts nocheck
+g.line(x0, y0, x1, y1).stroke({ width: 2, color: 0xffffff });
+g.polyline([x0, y0, x1, y1, x2, y2]).stroke({ width: 3, color: 0x0a84ff, cap: 'round' });
+g.polyline(points, { closed: true }).stroke(...);            // closed loop
+g.polyline(points, { smooth: 'monotone' }).stroke(...);      // charts: never overshoots the data
+g.polyline(points, { smooth: 'catmull' }).stroke(...);       // free curves through every point
+```
+
+Points can be a flat array `[x0, y0, x1, y1, ...]`, a typed array, or an array of `{ x, y }`.
+
+Each segment is its own instance. For every pixel, only the nearest segment shades it. So a
+translucent polyline has uniform alpha at its joints instead of darker blobs. For the same reason,
+joints are always round. Round is the only join that is continuous in distance.
+
+## Paths
+
+The canvas-style path API works for strokes:
+
+```ts
+g.moveTo(10, 80)
+    .quadraticCurveTo(60, 10, 110, 80)
+    .bezierCurveTo(140, 120, 180, 20, 220, 60)
+    .lineTo(260, 60)
+    .stroke({ width: 3, color: 0xff9f0a, cap: 'round' });
+```
+
+Silk flattens curves adaptively into segments. Free-form paths are stroke-only. For filled
+regions, use closed primitives or [`area()`](/docs/charts/).
+
+## Tapered strokes
+
+Pass an array as `width`. With `[start, end]`, Silk interpolates the width along the path length.
+With one value per point, each value sets the width at its vertex. Each segment becomes an uneven
+capsule, so the taper is smooth through joints.
+
+<Demo name="taper" height={240} />
+
+```ts
+g.polyline(points).stroke({ width: [2, 22], cap: 'round', gradient: along([0xff9f0a, 0xbf5af2]) });
+```
+
+`along()` is a gradient that follows the stroke from its first point to its last.
+
+## Hairlines
+
+Strokes thinner than one device pixel stay one pixel wide and fade in proportion. They do not break
+up into dots. See [Fills & strokes](/docs/fills-and-strokes/#hairlines).

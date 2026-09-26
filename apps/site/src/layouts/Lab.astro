@@ -1,0 +1,45 @@
+---
+import SEO from '@/components/SEO.astro';
+import { articleLd, breadcrumbLd, ogUrlForPath } from '@/lib/seo';
+import { SITE } from '@/lib/site';
+
+interface Props { slug: string; name: string; description: string; section: string }
+const { slug, name, description, section } = Astro.props;
+const path = `/lab/${slug}/`;
+---
+
+<!doctype html>
+<html lang="en">
+    <head>
+        <SEO
+            title={`${name}: PixiJS anti-aliasing lab | ${SITE.name}`}
+            description={description}
+            path={path}
+            image={ogUrlForPath(path)}
+            type="article"
+            article={{ section: `Lab: ${section}` }}
+            jsonLd={[articleLd({ title: name, description, path, section: 'Lab' }), breadcrumbLd([{ name: SITE.name, url: '/' }, { name: 'Lab', url: '/lab/' }, { name, url: path }])]}
+        />
+    </head>
+    <body data-lab={slug}>
+        <noscript>
+            <main style="font-family: system-ui, sans-serif; max-width: 42rem; margin: 3rem auto; padding: 0 1rem; color: #eee; background: #000;">
+                <h1>{name}</h1>
+                <p>{description}</p>
+                <p>This lab page is a live WebGL2 scene drawn with <a href="/">pixi-silk</a>, smooth anti-aliased graphics for PixiJS v8, and needs JavaScript.</p>
+                <ul>
+                    <li><a href="/lab/">All lab pages</a></li>
+                    <li><a href="/docs/">Docs</a></li>
+                    <li><a href="/docs/antialiasing-in-pixijs/">Anti-aliasing in PixiJS v8</a></li>
+                </ul>
+            </main>
+        </noscript>
+        <script>
+            // each lab page is a full-screen module that builds its own page chrome
+            const pages = import.meta.glob('../lab/[0-9]*.ts');
+            const load = pages[`../lab/${document.body.dataset.lab}.ts`];
+
+            load?.();
+        </script>
+    </body>
+</html>

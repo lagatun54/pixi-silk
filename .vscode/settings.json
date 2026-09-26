@@ -1,0 +1,12 @@
+{
+  // Biome formats and fixes on save (config in biome.json); Astro templates and Markdown are left alone
+  "editor.defaultFormatter": "biomejs.biome",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.fixAll.biome": "explicit",
+    "source.organizeImports.biome": "explicit"
+  },
+  "[astro]": { "editor.formatOnSave": false },
+  "[markdown]": { "editor.formatOnSave": false },
+  "[mdx]": { "editor.formatOnSave": false }
+}

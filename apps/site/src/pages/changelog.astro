@@ -1,0 +1,14 @@
+---
+import { Content } from '@/generated/CHANGELOG.md';
+import Base from '@/layouts/Base.astro';
+import { breadcrumbLd } from '@/lib/seo';
+import { SITE } from '@/lib/site';
+import { SILK_VERSION } from '@/lib/version';
+---
+
+<Base title={`${SITE.name} changelog and release notes`} description={`Release notes for ${SITE.name}, smooth anti-aliased graphics for PixiJS v8: new shapes, rendering fixes and API changes. Current version ${SILK_VERSION}.`} path="/changelog/" jsonLd={[breadcrumbLd([{ name: SITE.name, url: '/' }, { name: 'Changelog', url: '/changelog/' }])]}>
+    <div class="container-page max-w-3xl py-14">
+        <div class="font-mono text-xs text-muted-foreground">v{SILK_VERSION}</div>
+        <article class="prose-docs" data-pagefind-body data-pagefind-filter="section:Changelog"><Content /></article>
+    </div>
+</Base>

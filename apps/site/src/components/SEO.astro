@@ -1,0 +1,58 @@
+---
+import { canonical, imageUrl, type PageSeo } from '@/lib/seo';
+import { SITE, VERIFICATION } from '@/lib/site';
+
+type Props = PageSeo;
+const { title, description, path, image, type = 'website', article, keywords = [], markdown, jsonLd = [], noIndex = false } = Astro.props;
+const url = canonical(path ?? Astro.url.pathname);
+const img = imageUrl(image);
+const allKeywords = [...new Set([...keywords, ...SITE.keywords])].slice(0, 20);
+---
+
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>{title}</title>
+<meta name="description" content={description} />
+<meta name="keywords" content={allKeywords.join(', ')} />
+<meta name="author" content={SITE.author} />
+<link rel="canonical" href={url} />
+{noIndex
+    ? <meta name="robots" content="noindex, follow" />
+    : <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />}
+{VERIFICATION.google && <meta name="google-site-verification" content={VERIFICATION.google} />}
+{VERIFICATION.yandex && <meta name="yandex-verification" content={VERIFICATION.yandex} />}
+{VERIFICATION.bing && <meta name="msvalidate.01" content={VERIFICATION.bing} />}
+
+<meta property="og:type" content={type} />
+<meta property="og:site_name" content={SITE.name} />
+<meta property="og:title" content={title} />
+<meta property="og:description" content={description} />
+<meta property="og:url" content={url} />
+<meta property="og:image" content={img} />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content={`${title}: ${SITE.tagline}`} />
+<meta property="og:locale" content={SITE.locale} />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content={title} />
+<meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={img} />
+{type === 'article' && article?.section && <meta property="article:section" content={article.section} />}
+{type === 'article' && article?.published && <meta property="article:published_time" content={article.published} />}
+{type === 'article' && article?.modified && <meta property="article:modified_time" content={article.modified} />}
+{type === 'article' && article?.tags?.map((tag) => <meta property="article:tag" content={tag} />)}
+
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/favicon.ico" sizes="48x48" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="search" type="application/opensearchdescription+xml" href="/opensearch.xml" title={`${SITE.name} docs`} />
+<link rel="sitemap" type="application/xml" href="/sitemap.xml" />
+<link rel="alternate" type="text/plain" href="/llms.txt" title="LLM-readable summary of the docs" />
+<link rel="alternate" type="text/plain" href="/llms-full.txt" title="Full docs as plain text for LLMs" />
+{markdown && <link rel="alternate" type="text/markdown" href={markdown} title="This page as Markdown" />}
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)" />
+<meta name="color-scheme" content="dark light" />
+{jsonLd.map((obj) => <script type="application/ld+json" set:html={JSON.stringify(obj)} />)}

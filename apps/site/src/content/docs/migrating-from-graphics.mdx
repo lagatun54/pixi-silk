@@ -1,0 +1,51 @@
+---
+title: Migrating from Graphics
+eyebrow: Getting started
+seoTitle: 'Migrate from PixiJS Graphics to SilkGraphics'
+description: 'SilkGraphics mirrors the PixiJS v8 Graphics API: shapes on a path, fill and stroke, transforms. See what is the same, what differs and what is new.'
+keywords: ['PixiJS Graphics migration', 'Graphics vs SilkGraphics', 'PixiJS v8 Graphics API', 'drop-in Graphics replacement']
+updated: 2026-09-26
+api: [SilkGraphics]
+---
+
+Most `Graphics` code works after renaming the class:
+
+```diff
+- const g = new Graphics();
++ const g = new SilkGraphics();
+  g.roundRect(0, 0, 200, 80, 16).fill(0x1c1c1e).stroke({ width: 2, color: 0xffffff });
+  g.circle(40, 40, 12).fill({ color: 0xff375f, alpha: 0.8 });
+  g.moveTo(0, 100).lineTo(200, 120).stroke({ width: 1, color: 0xffffff });
+```
+
+## Same
+
+- **Active path.** `rect().circle().fill()` fills both shapes. Calling `stroke()` right after
+  `fill()` strokes the same shapes. Each shape stays one instance.
+- **Style objects**: `fill(color)`, `fill({ color, alpha })`, `stroke({ width, color, alpha, alignment, cap })`.
+  `alignment` accepts Pixi's numbers (1 inside, 0.5 centre, 0 outside) and the words
+  `'inside' | 'center' | 'outside'`.
+- **Path commands**: `moveTo`, `lineTo`, `quadraticCurveTo`, `bezierCurveTo`, `arc`, `closePath`,
+  `beginPath`.
+- **Transforms**: `save`, `restore`, `translateTransform`, `rotateTransform`, `scaleTransform`,
+  `setTransform`, `resetTransform`.
+- It is a regular display object. Position, mask and filter it, or put it in a render texture.
+  Give it `eventMode` and listen to pointer events. Hit tests use the real shape.
+
+## Different
+
+| `Graphics` | `SilkGraphics` |
+|---|---|
+| `fill()` on any polygon or path | fills closed primitives (rects, ellipses, sectors, polygons, stars, hearts, triangles) and areas. Free-form paths are stroke-only for now. |
+| miter, bevel and round joins | always round (`join` is accepted and ignored) |
+| `texture` fills | not supported (use gradients) |
+| `svg()` | not supported |
+| batched with other graphics | one draw call per `SilkGraphics`, not batched across objects |
+
+## New things you can use
+
+- `roundRect(x, y, w, h, radius | [tl, tr, br, bl], smoothing)` for squircles.
+- `arcSweep`, `sector` (donuts, pies, rounded gauge segments), `pill`, `heart`, `star` and `triangle` with rounded corners.
+- `polyline(points, { smooth: 'monotone' | 'catmull' })` and tapered widths with `stroke({ width: [2, 12] })`.
+- `area(points, baseline | lowerPoints)` for charts and bands.
+- `dash` and `dashOffset` on any stroke, `blur` on any paint, and gradients in OKLab.

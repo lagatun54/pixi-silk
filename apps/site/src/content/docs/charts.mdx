@@ -1,0 +1,58 @@
+---
+title: Charts
+eyebrow: Building UI
+seoTitle: 'Smooth line and area charts in PixiJS'
+description: 'Anti-aliased line and area charts with monotone smoothing that never overshoots, fading gradient fills, dotted guides, bars and dots.'
+keywords: ['PixiJS charts', 'area chart WebGL', 'smooth line chart', 'monotone interpolation', 'canvas charts']
+updated: 2026-09-26
+api: [SilkGraphics, monotoneX, vertical]
+---
+
+<Demo name="area-chart" height={240} />
+
+## Areas
+
+```ts
+g.area(points, baseline, { smooth: 'monotone' });          // between a series and a y baseline
+g.area(upperPoints, lowerPoints);                           // band between two series
+```
+
+`area()` fills the region under a series (or between two) with vertical columns. The columns tile
+exactly and share edges without seams, so translucent fills stay uniform. The top and bottom edges
+get analytic anti-aliasing.
+
+Call `stroke()` right after to draw the series line on top:
+
+```ts
+const FILL = vertical([[0, 0x0a84ff, 0.55], [1, 0x0a84ff, 0]], { easing: 'smooth' });
+
+g.area(points, 190, { smooth: 'monotone' }).fill(FILL).stroke({ width: 2.5, color: 0x0a84ff, cap: 'round' });
+```
+
+## Smoothing that respects the data
+
+`smooth: 'monotone'` never overshoots. It uses Steffen's method, like d3's `curveMonotoneX`. Peaks
+stay on the data points, and flat runs stay flat. Use `'catmull'` only for decorative curves. Silk
+exports the `monotoneX()` helper if you need the resampled points.
+
+## Guides, bars and dots
+
+```ts
+for (const y of [40, 90, 140]) g.line(20, y, 460, y).stroke({ width: 1, color: 0x3a3a3c, dash: [2, 4] });
+for (const [i, v] of values.entries()) g.roundRect(20 + i * 12, 190 - v, 8, v, 3).fill(0xffd60a);
+for (const [x, y] of points) g.circle(x, y, 3.5).fill(0xffffff).stroke({ width: 2, color: 0x0a84ff });
+```
+
+## One gradient across many shapes
+
+With `units: 'local'`, a gradient uses the graphics' coordinates instead of each shape's box. A row
+of bars then samples one continuous ramp:
+
+```ts
+const HEAT = linear([[0, 0x30d158], [0.5, 0xffd60a], [1, 0xff453a]], { units: 'local', from: [0, 190], to: [0, 40] });
+
+for (const [i, v] of values.entries()) g.roundRect(x(i), 190 - v, 8, v, 3).fill(HEAT);
+```
+
+The [Lab](/lab/) has complete chart widgets built from these pieces: area charts, bar charts,
+sparklines, heart-rate pills, ranges and gauges.

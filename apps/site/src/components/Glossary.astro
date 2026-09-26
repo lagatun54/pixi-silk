@@ -1,0 +1,24 @@
+---
+import { GLOSSARY } from '@/content/glossary.mjs';
+import { definedTermSetLd } from '@/lib/seo';
+
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const terms = [...GLOSSARY].sort((a, b) => a.term.localeCompare(b.term)).map((t) => ({ ...t, slug: slug(t.term) }));
+const ld = definedTermSetLd({ name: 'Anti-aliasing and vector graphics glossary', path: Astro.url.pathname, terms });
+---
+
+<dl class="not-prose mt-8 divide-y border-y">
+    {terms.map((t) => (
+        <div id={t.slug} class="scroll-mt-20 py-4">
+            <dt class="font-semibold">
+                <a href={`#${t.slug}`} class="hover:underline">{t.term}</a>
+                {t.aka && <span class="ml-2 text-sm font-normal text-muted-foreground">({t.aka.join(', ')})</span>}
+            </dt>
+            <dd class="mt-1 text-[15px] leading-relaxed text-foreground/85">
+                {t.definition}
+                {t.see && <> <a href={t.see} class="whitespace-nowrap text-muted-foreground underline underline-offset-4 hover:text-foreground">Read more</a></>}
+            </dd>
+        </div>
+    ))}
+</dl>
+<script type="application/ld+json" set:html={JSON.stringify(ld)} />

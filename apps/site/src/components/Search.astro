@@ -1,0 +1,56 @@
+---
+import { Search as SearchIcon } from 'lucide-react';
+
+const sections = [['', 'All'], ['Docs', 'Docs'], ['API reference', 'API'], ['FAQ', 'FAQ'], ['Lab', 'Lab']];
+---
+
+<button id="search-open" type="button" aria-label="Search the docs" class="inline-flex h-9 items-center gap-2 rounded-md border px-2.5 text-sm text-muted-foreground transition-colors hover:text-foreground sm:w-56">
+    <SearchIcon className="h-4 w-4" />
+    <span class="hidden sm:inline">Search docs</span>
+    <kbd class="ml-auto hidden rounded border px-1.5 font-mono text-[10px] sm:inline">⌘K</kbd>
+</button>
+<div id="search-modal" class="fixed inset-0 z-50 hidden items-start justify-center bg-black/60 p-4 pt-[12vh] backdrop-blur-sm" role="dialog" aria-modal="true" aria-label="Search">
+    <div class="w-full max-w-xl overflow-hidden rounded-xl border bg-card shadow-2xl">
+        <input id="search-input" type="search" placeholder="Search anti-aliasing, gradients, API" autocomplete="off" aria-controls="search-results" class="w-full border-b bg-transparent px-4 py-3 text-base outline-none" />
+        <fieldset class="flex min-w-0 flex-wrap gap-1.5 border-b px-3 py-2 text-xs">
+            <legend class="sr-only">Filter results</legend>
+            {sections.map(([value, label], i) => (
+                <button type="button" class="search-chip rounded-full border px-2.5 py-1 text-muted-foreground aria-pressed:bg-foreground aria-pressed:text-background" data-section={value} aria-pressed={i === 0 ? 'true' : 'false'}>{label}</button>
+            ))}
+            <a href="/search/" id="search-page-link" class="ml-auto self-center text-muted-foreground hover:text-foreground">Open the search page</a>
+        </fieldset>
+        <ul id="search-results" class="max-h-[55vh] overflow-y-auto p-2 text-sm"></ul>
+    </div>
+</div>
+<script is:inline src="/search.js"></script>
+<script is:inline>
+    (() => {
+        const modal = document.getElementById('search-modal');
+        const input = document.getElementById('search-input');
+        const page = document.getElementById('search-page-link');
+        const search = window.silkSearch.bind({
+            input,
+            list: document.getElementById('search-results'),
+            chips: [...modal.querySelectorAll('.search-chip')],
+            onQuery: (q) => { page.href = q ? `/search/?q=${encodeURIComponent(q)}` : '/search/'; },
+        });
+        const open = () => {
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            input.focus();
+            search.load();
+        };
+        const close = () => {
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        };
+
+        document.getElementById('search-open')?.addEventListener('click', open);
+        modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+        document.addEventListener('keydown', (e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); open(); }
+            if (e.key === '/' && !['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName ?? '')) { e.preventDefault(); open(); }
+            if (e.key === 'Escape') close();
+        });
+    })();
+</script>

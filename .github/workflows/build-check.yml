@@ -1,0 +1,45 @@
+name: Build Check
+
+# Same build the release runs, plus the docs site, the committed llms.txt and the bundle size.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build all publishable packages
+        run: pnpm build:all
+
+      - name: Build docs site
+        run: pnpm site:build
+
+      - name: SEO and GEO audit
+        # titles, descriptions, canonicals, H1s, JSON-LD, broken links, sitemap and llms.txt coverage
+        run: pnpm --filter @pixi-silk/site check:seo
+
+      - name: Generated llms.txt is committed
+        # `site:build` regenerates apps/site/public/llms.txt; fix a failure with
+        #   pnpm site:build && git add apps/site/public/llms.txt apps/site/public/llms-full.txt
+        run: git diff --exit-code -- apps/site/public/llms.txt apps/site/public/llms-full.txt
+
+      - name: Bundle size
+        run: pnpm size:check

@@ -1,0 +1,31 @@
+---
+import { Check, Copy } from 'lucide-react';
+
+interface Props { command: string }
+const { command } = Astro.props;
+---
+
+<button type="button" class="copy-cmd group inline-flex items-center gap-3 rounded-lg border bg-card px-4 py-2.5 font-mono text-sm" data-command={command} aria-label={`Copy "${command}"`}>
+    <span class="text-muted-foreground">$</span>
+    <span>{command}</span>
+    <Copy className="icon-copy h-4 w-4 text-muted-foreground group-hover:text-foreground" />
+    <Check className="icon-check hidden h-4 w-4 text-emerald-500" />
+</button>
+<script>
+    document.querySelectorAll<HTMLButtonElement>('.copy-cmd').forEach((button) => {
+        button.addEventListener('click', async () => {
+            try {
+                await navigator.clipboard.writeText(button.dataset.command ?? '');
+            }
+            catch {
+                return;
+            }
+            button.querySelector('.icon-copy')?.classList.add('hidden');
+            button.querySelector('.icon-check')?.classList.remove('hidden');
+            setTimeout(() => {
+                button.querySelector('.icon-copy')?.classList.remove('hidden');
+                button.querySelector('.icon-check')?.classList.add('hidden');
+            }, 1600);
+        });
+    });
+</script>

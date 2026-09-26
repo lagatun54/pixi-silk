@@ -1,0 +1,40 @@
+---
+import Footer from '@/components/Footer.astro';
+import Nav from '@/components/Nav.astro';
+import SEO from '@/components/SEO.astro';
+import { ogUrlForPath, type PageSeo } from '@/lib/seo';
+import { SITE } from '@/lib/site';
+import '@/styles/global.css';
+
+type Props = Partial<PageSeo>;
+const {
+    title = `${SITE.name}: ${SITE.tagline}`,
+    description = SITE.description,
+    path = Astro.url.pathname,
+    image,
+    type,
+    article,
+    keywords,
+    markdown,
+    jsonLd,
+    noIndex,
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="en" class="dark">
+    <head>
+        <script is:inline>
+            // dark unless the visitor chose light: set before first paint so nothing flashes
+            document.documentElement.classList.toggle('dark', localStorage.getItem('theme') !== 'light');
+        </script>
+        <SEO title={title} description={description} path={path} image={image ?? ogUrlForPath(path)} type={type} article={article} keywords={keywords} markdown={markdown} jsonLd={jsonLd} noIndex={noIndex} />
+        <link rel="preload" href="/fonts/Inter-400.woff" as="font" type="font/woff" crossorigin />
+    </head>
+    <body class="min-h-screen font-sans">
+        <a href="#content" class="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-background focus:px-3 focus:py-2">Skip to content</a>
+        <Nav />
+        <main id="content"><slot /></main>
+        <Footer />
+    </body>
+</html>

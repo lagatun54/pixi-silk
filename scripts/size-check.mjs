@@ -1,0 +1,97 @@
+#!/usr/bin/env node
+/**
+ * What an app pays for pixi-silk: bundles typical imports of the built package the way an app bundler
+ * does (package `exports` and `sideEffects`, pixi.js external, minified) and reports the gzipped size of
+ * each, compared with ci/size-baseline.json. Also checks that tree-shaking works: an import that has no
+ * business pulling in the shader or the gradient atlas must not contain them.
+ *
+ *   --check   fail when an import grew more than 10% over the baseline, or a tree-shaking check fails
+ *   --update  rewrite the baseline
+ */
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
+import { rolldown } from 'rolldown';
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+const pkgDir = join(root, 'packages/pixi-silk');
+const baselinePath = join(root, 'ci/size-baseline.json');
+const work = join(root, 'node_modules/.cache/size-check');
+const TOLERANCE = 0.1;
+
+/** name: [what the app imports, markers that must NOT end up in that bundle] */
+const IMPORTS = {
+    everything: ['*', []],
+    SilkGraphics: ['SilkGraphics', []],
+    'SilkGraphics + gradients': ['SilkGraphics, linear, vertical, radial, conic, along', []],
+    createSilkApp: ['createSilkApp', ['#version 300 es', 'silk-gradient-atlas']],
+    gradients: ['linear, radial, conic', ['#version 300 es', 'silk-gradient-atlas']],
+    'motion (damp, Spring, ease)': [
+        'damp, dampAngle, Spring, ease',
+        ['#version 300 es', 'silk-gradient-atlas', 'oklab'],
+    ],
+    parseColor: ['parseColor', ['#version 300 es', 'silk-gradient-atlas']],
+};
+
+// a scratch project that depends on the built package, so resolution goes through its package.json
+rmSync(work, { recursive: true, force: true });
+mkdirSync(join(work, 'node_modules'), { recursive: true });
+symlinkSync(pkgDir, join(work, 'node_modules/pixi-silk'), 'dir');
+
+const kb = (n) => `${(n / 1024).toFixed(2)} kB`;
+const results = {};
+const failures = [];
+
+for (const [name, [specifiers, forbidden]] of Object.entries(IMPORTS)) {
+    const entry = join(work, `${Object.keys(results).length}.js`);
+
+    writeFileSync(
+        entry,
+        specifiers === '*' ? `export * from 'pixi-silk';\n` : `export { ${specifiers} } from 'pixi-silk';\n`,
+    );
+    const bundle = await rolldown({ input: entry, external: [/^pixi\.js/], logLevel: 'silent' });
+    const { output } = await bundle.generate({ format: 'esm', minify: true });
+    const code = output.map((chunk) => chunk.code ?? '').join('\n');
+
+    await bundle.close();
+    results[name] = { minified: code.length, gzip: gzipSync(code, { level: 9 }).length };
+    for (const marker of forbidden) {
+        if (code.includes(marker)) failures.push(`${name}: bundle contains "${marker}" (tree-shaking broke)`);
+    }
+}
+rmSync(work, { recursive: true, force: true });
+
+const baseline = (() => {
+    try {
+        return JSON.parse(readFileSync(baselinePath, 'utf8'));
+    } catch {
+        return {};
+    }
+})();
+const width = Math.max(...Object.keys(results).map((n) => n.length));
+
+console.log(`${'import'.padEnd(width)}  ${'minified'.padStart(10)}  ${'gzip'.padStart(9)}  baseline`);
+for (const [name, { minified, gzip }] of Object.entries(results)) {
+    const base = baseline[name]?.gzip;
+    const drift = base ? (gzip - base) / base : 0;
+    const note = base ? `${kb(base)} (${drift >= 0 ? '+' : ''}${(drift * 100).toFixed(1)}%)` : 'none';
+
+    console.log(`${name.padEnd(width)}  ${kb(minified).padStart(10)}  ${kb(gzip).padStart(9)}  ${note}`);
+    if (base && drift > TOLERANCE)
+        failures.push(`${name}: ${kb(gzip)} gzip is more than 10% over the baseline ${kb(base)}`);
+}
+
+if (process.argv.includes('--update')) {
+    writeFileSync(
+        baselinePath,
+        `${JSON.stringify(Object.fromEntries(Object.entries(results).map(([n, r]) => [n, { gzip: r.gzip }])), null, 2)}\n`,
+    );
+    console.log('size-check: baseline updated');
+} else if (failures.length) {
+    for (const f of failures) console.error(`size-check: ${f}`);
+    if (process.argv.includes('--check')) {
+        console.error('If the growth is intended: pnpm size:update');
+        process.exit(1);
+    }
+}

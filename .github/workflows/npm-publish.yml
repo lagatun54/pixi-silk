@@ -1,0 +1,54 @@
+name: npm-publish
+
+# Changesets release flow with npm trusted publishing (OIDC, provenance, no NPM_TOKEN):
+#   1. PRs add .changeset/*.md files (`pnpm changeset`).
+#   2. On main this job opens / updates a "Version Packages" PR.
+#   3. Merging that PR runs `pnpm release` (build + changeset publish).
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # off until npm is set up: publish the first version by hand, add the trusted publisher on
+    # npmjs.com, then set the repository variable NPM_RELEASE to true
+    if: vars.NPM_RELEASE == 'true'
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          # no registry-url: it would write a placeholder token and break OIDC publishing
+      - name: npm with trusted publishing support
+        run: npm install -g npm@11.16.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec biome ci .
+      - run: pnpm lint:prose
+      - run: pnpm --filter pixi-silk typecheck
+      - run: pnpm --filter pixi-silk test
+      - name: Create release PR or publish
+        uses: changesets/action@v2
+        with:
+          version-script: pnpm version-packages
+          publish-script: pnpm release
+          create-github-releases: true
+          pr-title: 'chore: version packages'
+          commit-message: 'chore: version packages'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_CONFIG_PROVENANCE: 'true'

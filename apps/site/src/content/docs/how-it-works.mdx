@@ -1,0 +1,67 @@
+---
+title: How it works
+eyebrow: Rendering
+seoTitle: 'How SDF anti-aliasing works in pixi-silk'
+description: 'One instanced quad per primitive, exact signed distance functions per pixel, analytic coverage from screen-space derivatives and dithered OKLab ramps.'
+keywords: ['SDF rendering', 'signed distance field anti-aliasing', 'analytic anti-aliasing', 'fwidth antialiasing', 'shader anti-aliasing']
+updated: 2026-09-26
+---
+
+## One instance per primitive
+
+`SilkGraphics` is a Pixi `Mesh` with an instanced unit quad. Each primitive you draw is one
+instance of 40 floats: its bounds, shape parameters, paints, gradient geometry and dash pattern.
+The vertex shader expands the quad to the primitive's bounds plus an anti-aliasing margin. The
+margin is measured in device pixels, using the smallest singular value of the local-to-pixel
+Jacobian. That keeps it right at any zoom and for rotated or skewed objects.
+
+## Exact distance, analytic coverage
+
+For every pixel, the fragment shader computes the signed distance `d` from the pixel centre to the
+shape (negative inside). It supports rounded boxes with per-corner radii and superellipse corners,
+ellipses (trig-free Newton iterations), arcs, sectors, capsules, hearts, stars and triangles. It
+turns the distance into coverage with a one-pixel box filter:
+
+```glsl
+float px = sqrt(abs(dFdx(p).x * dFdy(p).y - dFdx(p).y * dFdy(p).x)); // one device pixel, in local units
+float coverage = clamp(0.5 - d / px, 0.0, 1.0);
+```
+
+The filter is exactly one device pixel wide, because `px` comes from screen-space derivatives. This
+holds at 1000x zoom, when rotated, and inside filters and render textures. With `blur`, the box
+filter becomes a gaussian: `0.5 - 0.5 * erf(d / (σ√2))`.
+
+## Fill and stroke without seams
+
+A primitive with both a fill and a stroke is shaded once. The shader computes the coverage of the
+whole shape and of the stroke band. It splits each pixel exactly into "stroke" and "fill outside the
+stroke", so no anti-aliased fill edge shows through an inner stroke.
+
+## Polylines
+
+Each polyline segment is an instance with its neighbours' geometry attached. A segment shades a
+fragment only if it is the nearest one, so joints are round and translucent lines never
+double-blend. A tiny antisymmetric bias breaks ties. Tapered strokes use the exact distance to an
+uneven capsule.
+
+## Areas
+
+Filled chart areas are split into vertical columns that tile exactly. Shared column edges get no
+anti-aliasing margin, only the top and bottom edges do. That keeps translucent fills uniform, with
+no seams between columns.
+
+## Hairlines
+
+A stroke thinner than a device pixel is widened to one pixel, with its alpha scaled by the ratio.
+The amount of "ink" stays the same, and thin lines never break apart.
+
+## Gradients
+
+Stops are interpolated (premultiplied, in OKLab by default) and baked into a shared 256x256 RGBA16F
+atlas, one reference-counted row per ramp. Sampling adds ±0.5 LSB of interleaved gradient noise,
+which removes 8-bit banding but leaves exact 8-bit colours untouched.
+
+## Hit testing
+
+The same distance functions run on the CPU, so `containsPoint` tests the real shape, including
+holes and stroke widths.

@@ -1,0 +1,23 @@
+{
+  "everything": {
+    "gzip": 16814
+  },
+  "SilkGraphics": {
+    "gzip": 15137
+  },
+  "SilkGraphics + gradients": {
+    "gzip": 15574
+  },
+  "createSilkApp": {
+    "gzip": 883
+  },
+  "gradients": {
+    "gzip": 2218
+  },
+  "motion (damp, Spring, ease)": {
+    "gzip": 441
+  },
+  "parseColor": {
+    "gzip": 290
+  }
+}

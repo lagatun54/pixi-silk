@@ -1,0 +1,76 @@
+{
+  "name": "pixi-silk",
+  "version": "0.1.0",
+  "description": "Smooth vector graphics for PixiJS v8: analytic anti-aliased SDF primitives, squircles, arcs, polylines, dashes, OKLab gradients, glows and DPR-exact canvases, one draw call per object.",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc && tsc -p tsconfig.build.json",
+    "prepack": "node ../../scripts/stage-package-files.mjs",
+    "postpack": "node ../../scripts/stage-package-files.mjs --clean"
+  },
+  "peerDependencies": {
+    "pixi.js": "^8.6.0"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/core": "^0.18.5",
+    "pixi.js": "^8.21.0",
+    "publint": "^0.3.24",
+    "tsdown": "^0.23.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  },
+  "license": "MIT",
+  "author": "schmooky",
+  "homepage": "https://pixi-silk.schmooky.dev",
+  "bugs": {
+    "url": "https://github.com/schmooky/pixi-silk/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schmooky/pixi-silk.git",
+    "directory": "packages/pixi-silk"
+  },
+  "keywords": [
+    "pixi",
+    "pixijs",
+    "pixi.js",
+    "graphics",
+    "vector",
+    "antialiasing",
+    "anti-aliasing",
+    "sdf",
+    "signed-distance-field",
+    "shader",
+    "webgl",
+    "squircle",
+    "gradient",
+    "oklab",
+    "charts",
+    "retina",
+    "hidpi",
+    "typescript"
+  ]
+}

@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# fast gates before anything leaves the laptop (skip with --no-verify)
+pnpm lint && pnpm --filter pixi-silk typecheck && pnpm --filter pixi-silk test

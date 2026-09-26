@@ -1,0 +1,70 @@
+import { getCollection } from 'astro:content';
+import { LAB_SECTIONS } from '@/lab/catalog.mjs';
+import type { OgTarget } from './render';
+
+/** One card per route family; ids match `ogUrlForPath()` in src/lib/seo.ts. */
+export async function ogTargets(): Promise<OgTarget[]> {
+    const docs = await getCollection('docs');
+    const home = {
+        eyebrow: 'PixiJS v8, WebGL2',
+        title: 'Vector graphics, smooth as silk',
+        subtitle:
+            'Exact anti-aliasing at any zoom and DPR. Squircles, arcs, dashes, OKLab gradients and glows, one draw call per object.',
+    };
+
+    return [
+        { id: 'home', ...home },
+        { id: 'default', ...home },
+        {
+            id: 'section/docs',
+            eyebrow: 'Documentation',
+            title: 'Guides with live demos',
+            subtitle: 'Shapes, strokes, dashes, gradients, glows, charts, transforms, hit testing and rendering.',
+        },
+        {
+            id: 'section/api',
+            eyebrow: 'API reference',
+            title: 'Every export, from the source',
+            subtitle: 'SilkGraphics, createSilkApp, gradients, curves and motion helpers.',
+        },
+        {
+            id: 'section/lab',
+            eyebrow: 'Lab',
+            title: 'Full-screen experiments',
+            subtitle: '35 pages: Graphics vs Silk, infinite zoom, widgets, stress test and reference sheets.',
+        },
+        {
+            id: 'section/showcase',
+            eyebrow: 'Showcase',
+            title: 'Rebuilt pixel for pixel',
+            subtitle: 'Five design reference sheets, 81 widgets, measured against the originals.',
+        },
+        {
+            id: 'section/faq',
+            eyebrow: 'FAQ',
+            title: 'Questions & answers',
+            subtitle: 'Smooth PixiJS graphics, squircles, gradients without banding, retina canvases.',
+        },
+        { id: 'section/changelog', eyebrow: 'Changelog', title: 'Release notes' },
+        {
+            id: 'section/search',
+            eyebrow: 'Search',
+            title: 'Search the docs',
+            subtitle: 'Anti-aliasing, smooth shapes, gradients, charts and the full API.',
+        },
+        ...docs.map((d) => ({
+            id: `docs/${d.id}`,
+            eyebrow: d.data.eyebrow ?? 'Docs',
+            title: d.data.title,
+            subtitle: d.data.description,
+        })),
+        ...LAB_SECTIONS.flatMap(([section, items]) =>
+            items.map(([slug, name, description]) => ({
+                id: `lab/${slug}`,
+                eyebrow: `Lab: ${section}`,
+                title: name,
+                subtitle: description,
+            })),
+        ),
+    ];
+}

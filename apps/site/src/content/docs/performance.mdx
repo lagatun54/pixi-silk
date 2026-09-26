@@ -1,0 +1,35 @@
+---
+title: Performance
+eyebrow: Rendering
+seoTitle: 'PixiJS vector graphics performance: one draw call'
+description: 'One instanced draw call per SilkGraphics and about 12 ms of CPU to rebuild 50,000 primitives, plus tips for static layers, gradients and fill rate.'
+keywords: ['PixiJS performance', 'instanced rendering', 'draw calls', 'WebGL 2D performance']
+updated: 2026-09-26
+api: [SilkGraphics]
+---
+
+<Demo name="stress" height={280} />
+
+## The cost model
+
+- Each `SilkGraphics` is one **draw call**, whatever it contains.
+- The **CPU** writes 40 floats per primitive into a reusable buffer. Rebuilding 50,000 primitives
+  every frame takes about 12 ms on a laptop. Typical UIs (hundreds of primitives) cost well under
+  0.5 ms.
+- The **GPU** shades each primitive as one quad sized to its bounds plus a one-pixel margin, once
+  per covered pixel. Cost scales with covered area, like any 2D renderer. Large blurs grow the quad
+  by 3σ.
+- Buffers grow to the largest frame and stay in **memory**. Gradients share rows in one 256x256
+  half-float atlas.
+
+## Tips
+
+- Split static and dynamic parts. Draw backgrounds and label shapes once, in one object. Redraw only
+  the animated parts every frame.
+- Move objects instead of rebuilding them. Animating `position`, `rotation`, `scale` or `alpha` of a
+  `SilkGraphics` changes one matrix.
+- Reuse gradients. Create them at module scope. Identical ramps share an atlas row anyway, but
+  reusing the object avoids re-parsing stops.
+- Group primitives that share a layer into one `SilkGraphics` to save draw calls.
+- Cap the resolution on large canvases: `createSilkApp({ maxResolution: 2 })`.
+- Stop redrawing when idle. Check `Spring.settled`, or redraw only on data changes.

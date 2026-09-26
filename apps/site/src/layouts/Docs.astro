@@ -1,0 +1,141 @@
+---
+import type { MarkdownHeading } from 'astro';
+import DocsSidebar from '@/components/DocsSidebar.astro';
+import { DOCS_LINKS, DOCS_NAV } from '@/content/nav.mjs';
+import Base from '@/layouts/Base.astro';
+import { apiNav } from '@/lib/api';
+import { docsInOrder } from '@/lib/docs';
+import { articleLd, breadcrumbLd, isoDate, pageTitle } from '@/lib/seo';
+import { SITE } from '@/lib/site';
+import { SILK_VERSION } from '@/lib/version';
+
+interface Props {
+    title?: string;
+    /** `<title>` / Open Graph title when it differs from the heading. */
+    seoTitle?: string;
+    description?: string;
+    eyebrow?: string;
+    section?: 'docs' | 'api';
+    headings?: MarkdownHeading[];
+    keywords?: string[];
+    updated?: Date;
+    /** Set when the layout is used from Markdown frontmatter (the TypeDoc pages). */
+    frontmatter?: { title?: string; description?: string; eyebrow?: string; section?: 'docs' | 'api' };
+    /** Link to the Markdown source of this page (docs pages). */
+    markdown?: string;
+    /** Extra structured data for this page. */
+    jsonLd?: unknown[];
+}
+const props = Astro.props;
+const fm = props.frontmatter ?? {};
+const title = props.title ?? fm.title ?? SITE.name;
+const section = props.section ?? fm.section ?? 'docs';
+const description = props.description ?? fm.description ?? `${title}: ${SITE.tagline}.`;
+const eyebrow = props.eyebrow ?? fm.eyebrow;
+const pathname = Astro.url.pathname;
+const headings = (props.headings ?? []).filter((h) => h.depth === 2 || h.depth === 3);
+const sectionLabel = section === 'api' ? 'API reference' : 'Docs';
+const fullTitle = pageTitle(props.seoTitle ?? (section === 'api' ? `${title} (${eyebrow ?? 'API'}) API reference` : title));
+const modified = props.updated ? isoDate(props.updated) : undefined;
+
+const docs = await docsInOrder();
+const nav = section === 'api'
+    ? apiNav()
+    : [
+        ...DOCS_NAV.map((s) => ({ title: s.title, items: s.items.map((id) => ({ label: docs.find((d) => d.slug === id)!.title, href: `/docs/${id}/` })) })),
+        { title: 'More', items: DOCS_LINKS.map((l) => ({ label: l.label, href: l.href })) },
+    ];
+const current = docs.find((d) => d.href === pathname);
+const index = current ? docs.indexOf(current) : -1;
+const prev = index > 0 ? docs[index - 1] : null;
+const next = index >= 0 && index < docs.length - 1 ? docs[index + 1] : null;
+const crumbs = [
+    { name: SITE.name, url: '/' },
+    { name: sectionLabel, url: section === 'api' ? '/api/' : '/docs/' },
+    ...(current ? [{ name: current.section, url: `/docs/#${current.section.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` }] : []),
+    { name: title, url: pathname },
+].filter((c, i, all) => i === 0 || c.url !== all[i - 1].url);
+const jsonLd = [
+    articleLd({ title, description, path: pathname, section: current?.section ?? sectionLabel, keywords: props.keywords, published: SITE.published, modified }),
+    breadcrumbLd(crumbs),
+    ...(props.jsonLd ?? []),
+];
+---
+
+<Base
+    title={fullTitle}
+    description={description}
+    path={pathname}
+    type="article"
+    article={{ section: current?.section ?? sectionLabel, tags: props.keywords, published: SITE.published, modified }}
+    keywords={props.keywords}
+    markdown={props.markdown}
+    jsonLd={jsonLd}
+>
+    <div class="container-page grid gap-10 py-10 md:grid-cols-[220px_minmax(0,1fr)] xl:grid-cols-[220px_minmax(0,1fr)_200px]">
+        <DocsSidebar nav={nav} pathname={pathname}>
+            <nav slot="mobile" aria-label="Docs" class="space-y-4 text-sm">
+                {nav.map((s) => (
+                    <div>
+                        <div class="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{s.title}</div>
+                        {s.items.map((i) => <a href={i.href} class="block py-1 text-muted-foreground hover:text-foreground">{i.label}</a>)}
+                    </div>
+                ))}
+            </nav>
+        </DocsSidebar>
+        <article class="prose-docs min-w-0 max-w-3xl animate-fade-in" data-pagefind-body data-pagefind-filter={`section:${sectionLabel}`}>
+            <nav aria-label="Breadcrumb" class="not-prose mb-3 text-xs text-muted-foreground" data-pagefind-ignore>
+                <ol class="flex flex-wrap items-center gap-1.5">
+                    {crumbs.slice(0, -1).map((c) => (
+                        <li class="flex items-center gap-1.5"><a href={c.url} class="hover:text-foreground">{c.name}</a><span aria-hidden="true">/</span></li>
+                    ))}
+                </ol>
+            </nav>
+            {eyebrow && <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-silk" data-pagefind-ignore>{eyebrow}</div>}
+            <h1 class="!mt-0 mb-4 text-4xl font-semibold tracking-tight">{title}</h1>
+            {props.description && <p class="!mt-0 text-lg !text-muted-foreground">{props.description}</p>}
+            {modified && (
+                <p class="!mt-0 flex flex-wrap gap-x-4 !text-xs !text-muted-foreground" data-pagefind-ignore>
+                    <span>Updated <time datetime={modified}>{new Date(modified).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' })}</time></span>
+                    <span>pixi-silk {SILK_VERSION}</span>
+                </p>
+            )}
+            <slot />
+            {(prev || next) && (
+                <nav aria-label="Previous and next page" class="not-prose mt-16 grid gap-3 sm:grid-cols-2" data-pagefind-ignore>
+                    {prev ? (
+                        <a href={prev.href} rel="prev" class="group rounded-xl border bg-card p-4 no-underline transition-all hover:-translate-y-0.5 hover:border-foreground/30">
+                            <div class="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Previous</div>
+                            <div class="mt-1 font-semibold text-foreground">{prev.title}</div>
+                        </a>
+                    ) : <div />}
+                    {next && (
+                        <a href={next.href} rel="next" class="group rounded-xl border bg-card p-4 text-right no-underline transition-all hover:-translate-y-0.5 hover:border-foreground/30">
+                            <div class="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Next</div>
+                            <div class="mt-1 font-semibold text-foreground">{next.title}</div>
+                        </a>
+                    )}
+                </nav>
+            )}
+        </article>
+        <aside class="hidden xl:block" data-pagefind-ignore>
+            <div class="sticky top-20 text-sm">
+                {headings.length > 0 && (
+                    <>
+                        <div class="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">On this page</div>
+                        <ul class="space-y-1.5">
+                            {headings.map((h) => (
+                                <li class:list={[h.depth === 3 && 'pl-3']}>
+                                    <a href={`#${h.slug}`} class="text-muted-foreground hover:text-foreground">{h.text.replace(/#$/, '')}</a>
+                                </li>
+                            ))}
+                        </ul>
+                    </>
+                )}
+                {props.markdown && (
+                    <a href={props.markdown} class="mt-6 block text-xs text-muted-foreground hover:text-foreground">View as Markdown</a>
+                )}
+            </div>
+        </aside>
+    </div>
+</Base>

@@ -1,0 +1,143 @@
+---
+import { Picture } from 'astro:assets';
+import CopyCommand from '@/components/CopyCommand.astro';
+import Demo from '@/components/Demo.astro';
+import FeatureGrid from '@/components/FeatureGrid.astro';
+import HeroCanvas from '@/components/react/HeroCanvas';
+import { FAQ } from '@/content/faq.mjs';
+import Base from '@/layouts/Base.astro';
+import { breadcrumbLd, softwareApplicationLd, softwareLd, webSiteLd } from '@/lib/seo';
+import { SHEETS } from '@/lib/showcase';
+import { SITE } from '@/lib/site';
+
+const live = SHEETS.find((s) => s.n === 4)!;
+
+const facts = [
+    ['1', 'draw call per SilkGraphics'],
+    ['1:1', 'canvas to device pixels'],
+    ['16-bit', 'dithered gradient ramps'],
+    ['0', 'MSAA, filters or extra passes'],
+];
+---
+
+<Base title={`${SITE.name}: smooth, anti-aliased graphics for PixiJS v8`} description={SITE.description} path="/" jsonLd={[webSiteLd(), softwareApplicationLd(), softwareLd(), breadcrumbLd([{ name: SITE.name, url: '/' }])]}>
+    <section class="relative overflow-hidden border-b">
+        <div class="grid-bg pointer-events-none absolute inset-0"></div>
+        <div class="container-page relative py-16 sm:py-24" data-pagefind-body data-pagefind-filter="section:Home">
+            <p class="flex flex-wrap gap-x-5 font-mono text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                <span>PixiJS v8</span><span>WebGL2</span><span>TypeScript</span><span>MIT</span>
+            </p>
+            <h1 class="mt-4 max-w-4xl text-5xl font-semibold tracking-tight sm:text-6xl">
+                Smooth, anti-aliased graphics<br class="hidden sm:block" /> for PixiJS v8, <span class="silk-text whitespace-nowrap">smooth as silk.</span>
+            </h1>
+            <p class="mt-5 max-w-2xl text-lg leading-relaxed text-muted-foreground">
+                <strong class="text-foreground">pixi-silk</strong> draws each PixiJS shape as an exact signed distance field.
+                Every edge is anti-aliased per pixel, so it stays smooth at any zoom, rotation and pixel ratio.
+                No MSAA, no triangles, one draw call per object. Squircles, arcs, smooth lines, dashes, OKLab gradients and glows are included.
+            </p>
+            <div class="mt-8 flex flex-wrap items-center gap-3">
+                <a href="/docs/quick-start/" class="rounded-lg bg-foreground px-5 py-2.5 text-sm font-semibold text-background hover:opacity-90">Get started</a>
+                <a href="/lab/" class="rounded-lg border px-5 py-2.5 text-sm font-semibold hover:bg-accent">Browse the lab</a>
+                <CopyCommand command="npm i pixi-silk pixi.js" />
+            </div>
+        </div>
+        <div class="container-page relative pb-16">
+            <div class="h-[280px] overflow-hidden rounded-2xl border bg-[#070708] max-[900px]:h-[380px]">
+                <HeroCanvas client:idle />
+            </div>
+        </div>
+    </section>
+
+    <section class="container-page grid gap-10 pt-14 lg:grid-cols-[1.1fr_1fr]" data-pagefind-body data-pagefind-filter="section:Home">
+        <div>
+            <h2 class="text-3xl font-semibold tracking-tight">What is pixi-silk?</h2>
+            <p class="mt-4 leading-relaxed text-muted-foreground">
+                pixi-silk is an open-source TypeScript library that adds <strong class="text-foreground">smooth, anti-aliased vector graphics</strong>
+                to PixiJS v8. Its <code class="rounded bg-muted px-1.5 py-0.5 font-mono text-sm">SilkGraphics</code> object has the same
+                shape, fill and stroke API as Pixi's Graphics. It does not cut shapes into triangles. For every pixel, it computes the exact
+                signed distance to the shape and turns it into coverage over one device pixel. This is
+                <a class="underline underline-offset-4" href="/docs/antialiasing-in-pixijs/">analytic anti-aliasing</a>. It is exact at any scale,
+                in filters and render textures, and on retina screens with fractional pixel ratios.
+            </p>
+        </div>
+        <ul class="grid gap-2 self-center text-sm text-muted-foreground">
+            <li><a class="underline underline-offset-4 hover:text-foreground" href="/docs/antialiasing-in-pixijs/">Anti-aliasing in PixiJS v8: MSAA vs SDF</a></li>
+            <li><a class="underline underline-offset-4 hover:text-foreground" href="/docs/smooth-graphics-pixijs/">Fix jagged, blurry or flickering PixiJS graphics</a></li>
+            <li><a class="underline underline-offset-4 hover:text-foreground" href="/docs/graphics-smooth-v8/">@pixi/graphics-smooth and PixiJS v8</a></li>
+            <li><a class="underline underline-offset-4 hover:text-foreground" href="/docs/how-it-works/">How SDF anti-aliasing works</a></li>
+            <li><a class="underline underline-offset-4 hover:text-foreground" href="/docs/glossary/">Glossary: MSAA, SDF, DPR, squircle, OKLab</a></li>
+        </ul>
+    </section>
+
+    <section class="container-page py-14">
+        <dl class="grid grid-cols-2 gap-6 md:grid-cols-4">
+            {facts.map(([value, label]) => (
+                <div>
+                    <dt class="sr-only">{label}</dt>
+                    <dd class="text-3xl font-semibold tracking-tight">{value}</dd>
+                    <dd class="mt-1 text-sm text-muted-foreground">{label}</dd>
+                </div>
+            ))}
+        </dl>
+    </section>
+
+    <section class="container-page grid items-start gap-10 py-10 lg:grid-cols-2">
+        <div>
+            <h2 class="text-3xl font-semibold tracking-tight">Graphics-like API, per-pixel precision</h2>
+            <p class="mt-4 leading-relaxed text-muted-foreground">
+                <code class="rounded bg-muted px-1.5 py-0.5 font-mono text-sm">SilkGraphics</code> reads like Pixi's
+                <code class="rounded bg-muted px-1.5 py-0.5 font-mono text-sm">Graphics</code>: add shapes to the path, then fill or stroke them.
+                Each primitive is one instanced quad. Its fragment shader computes the exact distance to the shape for every pixel.
+            </p>
+            <ul class="mt-5 list-disc space-y-2 pl-5 text-sm text-muted-foreground">
+                <li>Works for UI, charts, icons and widgets</li>
+                <li>Clearing and redrawing every frame is cheap</li>
+                <li>Every guide has live demos with their source</li>
+            </ul>
+            <a href="/docs/introduction/" class="mt-6 inline-block text-sm font-semibold underline underline-offset-4">Read the introduction</a>
+        </div>
+        <Demo name="quick-start" height={220} />
+    </section>
+
+    <section class="container-page py-14">
+        <h2 class="mb-6 text-3xl font-semibold tracking-tight">Everything is smooth</h2>
+        <FeatureGrid />
+    </section>
+
+    <section class="container-page grid items-start gap-10 py-10 lg:grid-cols-2">
+        <Demo name="versus" height={260} />
+        <div>
+            <h2 class="text-3xl font-semibold tracking-tight">Why v8 stopped looking smooth</h2>
+            <p class="mt-4 leading-relaxed text-muted-foreground">
+                PixiJS v8 turns <code class="font-mono text-sm">Graphics</code> into triangles once, when you draw. Scale it up and curves show facets.
+                Thin lines crawl between pixel rows. Anti-aliasing is MSAA on the main canvas only: filters and render textures stay aliased
+                unless you opt each one in, and filters render at resolution 1. Silk computes coverage per pixel, so none of this applies.
+            </p>
+            <a href="/docs/how-it-works/" class="mt-6 inline-block text-sm font-semibold underline underline-offset-4">How it works</a>
+        </div>
+    </section>
+
+    <section class="container-page py-14">
+        <div class="flex flex-wrap items-baseline justify-between gap-3">
+            <h2 class="text-3xl font-semibold tracking-tight">Rebuilt pixel for pixel</h2>
+            <a href="/showcase/" class="text-sm text-muted-foreground hover:text-foreground">All five sheets</a>
+        </div>
+        <p class="mt-3 max-w-3xl text-muted-foreground">Five design reference sheets and 81 widgets, measured against the originals. Left is the reference, right is the live render.</p>
+        <a href="/showcase/" class="mt-6 block overflow-hidden rounded-xl border">
+            <Picture src={live.image} alt={live.alt} formats={['avif', 'webp']} widths={[800, 1200, 1600]} sizes="(min-width: 1240px) 1192px, 100vw" loading="lazy" class="h-auto w-full" />
+        </a>
+    </section>
+
+    <section class="container-page max-w-3xl py-14">
+        <h2 class="text-3xl font-semibold tracking-tight">Questions</h2>
+        <div class="mt-6 divide-y border-y">
+            {FAQ.slice(0, 5).map((item) => (
+                <details class="group py-4">
+                    <summary class="cursor-pointer list-none font-medium">{item.q}</summary>
+                    <p class="mt-2 text-sm leading-relaxed text-muted-foreground">{item.a.replace(/`/g, '')}</p>
+                </details>
+            ))}
+        </div>
+        <a href="/faq/" class="mt-6 inline-block text-sm font-semibold underline underline-offset-4">All questions</a>
+    </section>
+</Base>

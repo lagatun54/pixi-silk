@@ -1,0 +1,9 @@
+**/node_modules
+**/dist
+**/.astro
+.git
+.shots
+.claude
+apps/site/src/pages/api
+apps/site/src/generated
+*.log

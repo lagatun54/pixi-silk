@@ -1,0 +1,71 @@
+---
+title: Shapes
+eyebrow: Drawing
+seoTitle: 'Smooth shapes and squircles in PixiJS v8'
+description: 'Rects, squircles with per-corner radii, pills, circles, ellipses, hearts, stars, polygons and rounded triangles, each an exact anti-aliased distance field.'
+keywords: ['PixiJS shapes', 'PixiJS squircle', 'rounded rectangle PixiJS', 'smooth circle WebGL', 'superellipse corners']
+updated: 2026-09-26
+api: [SilkGraphics]
+---
+
+Every shape method adds a primitive to the **active path**. Nothing is drawn until you call
+`fill()` or `stroke()`, which paint everything on the path. Pixi's `Graphics` works the same way.
+
+<Demo name="shapes" height={270} />
+
+## Rectangles and squircles
+
+```ts
+g.rect(x, y, width, height);
+g.roundRect(x, y, width, height, radius);                 // circular corners
+g.roundRect(x, y, width, height, radius, 0.6);            // squircle: continuous curvature
+g.roundRect(x, y, width, height, [24, 24, 8, 8]);         // per corner: tl, tr, br, bl
+g.pill(x, y, width, height);                               // fully round ends
+```
+
+The `smoothing` argument (0 to 1) turns corners into superellipse arcs whose curvature grows
+gradually. App icons and cards on iOS have these corners. iOS uses about `0.6`. A circular corner
+meets the straight side with a jump in curvature, which the eye reads as a slight kink. At the 45°
+point, a smoothed corner is exactly as deep as a circular corner of the same `radius`. So switching
+is a drop-in change.
+
+<Demo name="squircle" height={240} caption="Pink is a circular corner of the same radius. Blue is the squircle." />
+
+## Circles, ellipses and hearts
+
+```ts
+g.circle(cx, cy, radius);
+g.ellipse(cx, cy, radiusX, radiusY);          // exact ellipse distance (Newton solve, no approximation)
+g.heart(cx, cy, width, rounding);             // rounding 0..0.3 puffs it up
+```
+
+## Polygons
+
+```ts
+g.regularPoly(cx, cy, radius, sides, rotation, cornerRadius);   // first vertex points up
+g.star(cx, cy, points, radius, innerRadius, rotation, cornerRadius);
+g.triangle(x0, y0, x1, y1, x2, y2, cornerRadius);
+```
+
+Rounded corners on polygons, stars and triangles are exact, not approximations.
+
+## Rotated shapes
+
+Shapes drawn inside a rotated transform stay exact, because the rotation is part of the primitive.
+See [Transforms](/docs/transforms/).
+
+```ts
+g.save().translateTransform(100, 100).rotateTransform(Math.PI / 6);
+g.roundRect(-40, -20, 80, 40, 12, 0.6).fill(0x5e5ce6);
+g.restore();
+```
+
+## Fill and stroke together
+
+```ts
+g.roundRect(0, 0, 200, 80, 20, 0.6).fill(0x1c1c1e).stroke({ width: 2, color: 0x3a3a3c });
+```
+
+Calling `stroke()` right after `fill()` merges both into one primitive. The shader splits each
+pixel's coverage exactly between the fill and the stroke band. So there is never a seam or a halo
+between them. See [Fills & strokes](/docs/fills-and-strokes/).

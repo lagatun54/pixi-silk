@@ -1,0 +1,70 @@
+---
+title: Resolution & DPR
+eyebrow: Rendering
+seoTitle: 'Crisp PixiJS canvas on retina and HiDPI screens'
+description: 'createSilkApp maps the canvas 1:1 to device pixels, even at fractional DPRs, follows DPR changes and renders filters at screen resolution.'
+keywords: ['PixiJS retina', 'PixiJS blurry canvas', 'devicePixelRatio', 'HiDPI canvas', 'PixiJS resolution autoDensity']
+updated: 2026-09-26
+api: [createSilkApp, SilkAppOptions, SilkApp]
+---
+
+<Demo name="resolution" height={260} caption="Every wedge of this Siemens star narrows below a pixel. Compare 1x with your device resolution." />
+
+Smooth edges need two things: exact coverage (Silk's shader) and a canvas whose pixels are the
+screen's pixels. `createSilkApp` handles the canvas:
+
+```ts
+import { createSilkApp } from 'pixi-silk';
+
+const silk = await createSilkApp({
+    parent: document.getElementById('stage')!,
+    background: 0x000000,
+    maxResolution: 3,          // cap the DPR (memory / fill rate)
+    // fixedResolution: 2,     // force a resolution instead
+    // touchAction: 'none',    // canvases that handle drags themselves
+});
+
+silk.app;              // the Pixi Application
+silk.width;            // CSS pixels
+silk.resolution;       // device pixels per CSS pixel
+silk.setResolution(1); // compare at 1x (null returns to devicePixelRatio)
+silk.destroy();
+```
+
+## What it sets up
+
+- It sizes the **backing store** with `ResizeObserver` and `device-pixel-content-box`. Every canvas
+  pixel maps to exactly one screen pixel, even at a DPR of 1.5 or 2.625. Rounding `cssWidth * dpr`
+  yourself can be off by one. If it is, the browser resamples the whole canvas and blurs every edge.
+- **DPR changes** (dragging the window to another display, browser zoom) resize the backing store.
+  A `matchMedia` listener handles Safari, which has no device-pixel-content-box.
+- **MSAA** is off (`antialias: false`). Silk's coverage is analytic, so MSAA would only cost
+  bandwidth.
+- **Pixel rounding** is off (`roundPixels: false`), so sub-pixel motion stays smooth.
+- **Filters** render at screen resolution. Pixi filters default to resolution 1, which blurs
+  everything behind a filter on retina screens. `createSilkApp` sets
+  `Filter.defaultOptions.resolution` to `'inherit'` (opt out with `inheritFilterResolution: false`).
+- **Touch scrolling** works. Pixi sets `touch-action: none` on its canvas, which blocks page
+  scrolling on phones. The default here is `pan-y pinch-zoom`.
+
+## Using your own Application
+
+If you create the application yourself, use the same settings:
+
+```ts
+await app.init({
+    preference: 'webgl',
+    antialias: false,
+    autoDensity: true,
+    resolution: window.devicePixelRatio,
+    roundPixels: false,
+});
+Filter.defaultOptions.resolution = 'inherit';
+```
+
+## Render textures and filters
+
+A `SilkGraphics` in a render texture or behind a filter is anti-aliased at that target's
+resolution, because Silk's coverage uses screen-space derivatives. Give render textures the
+renderer's resolution to keep them sharp on retina screens. The
+[render texture lab page](/lab/06-render-texture/) shows the difference.

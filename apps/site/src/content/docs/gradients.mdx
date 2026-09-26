@@ -1,0 +1,68 @@
+---
+title: Gradients
+eyebrow: Paint
+seoTitle: 'Smooth gradients without banding in PixiJS (OKLab)'
+description: 'Linear, radial, conic and along-the-path gradients in OKLab, with smooth easing. Half-float ramps and dithering keep dark gradients free of banding.'
+keywords: ['PixiJS gradient', 'gradient banding fix', 'OKLab gradient', 'conic gradient WebGL', 'dithering gradients']
+updated: 2026-09-26
+api: [linear, vertical, horizontal, radial, conic, along, Gradient]
+---
+
+<Demo name="gradients" height={260} />
+
+## Kinds
+
+```ts
+import { linear, vertical, horizontal, radial, conic, along } from 'pixi-silk';
+
+linear(stops, { from: [0, 0], to: [1, 1] });       // diagonal across the shape's box
+vertical(stops);                                    // top to bottom of the shape
+horizontal(stops);                                  // left to right
+radial(stops, { center: [0.3, 0.3], radius: 0.8, innerRadius: 0.2 });
+conic(stops, { startAngle, sweep });                // around a centre (on an arc, it spans the arc)
+along(stops);                                       // along a stroke, first point to last
+```
+
+Use a gradient anywhere a colour goes: `fill(gradient)`, `stroke({ gradient })`, or
+`fill({ gradient, color })`, where `color` tints the ramp.
+
+## Stops
+
+```ts
+linear([0xff375f, 0x0a84ff]);                           // spread evenly
+linear([[0, 0xff375f], [0.3, 0xffd60a], [1, 0x0a84ff]]);
+linear([[0, 0xffffff, 1], [1, 0xffffff, 0]]);            // [offset, color, alpha]
+linear([{ offset: 0.5, color: '#30d158', alpha: 0.5 }]);
+linear([[0, RED], [0.5, RED], [0.5, BLUE], [1, BLUE]]);  // hard stop
+```
+
+Silk clamps offsets to 0..1 and makes them non-decreasing, like CSS.
+
+## Colour space
+
+By default, stops interpolate in **OKLab**, a perceptual space. A red-to-green ramp passes through
+a bright yellow, not a muddy brown. Lightness also changes evenly. Pass `space: 'linear'` for
+physically linear light (glows, light falloff) or `space: 'srgb'` for CSS-like results.
+Interpolation is premultiplied, so fading a colour to transparent never darkens it.
+
+## Easing
+
+`easing: 'smooth'` runs a monotone cubic spline through the stops, with flat ends. It removes the
+Mach bands at every stop of a linear ramp. It never overshoots. A function `(t) => t` remaps the
+ramp parameter for custom falloffs.
+
+## Units and extend
+
+- With `units: 'shape'` (default), coordinates are fractions of the shape's bounding box. One
+  gradient object then fits every shape it paints.
+- With `units: 'local'`, coordinates are in the graphics' local space. One continuous ramp then
+  spans many shapes (a chart's bars, a row of pills).
+- `extend: 'pad' | 'repeat' | 'reflect'` controls what happens outside 0..1.
+
+## No banding
+
+Dark, wide gradients stay smooth on 8-bit displays. Silk bakes each ramp once into a shared
+256-wide half-float atlas. The shader samples it per pixel with ±½ LSB dither (interleaved gradient
+noise). Try both toggles below. The reveal toggle multiplies the contrast by 8 to show the steps.
+
+<Demo name="dither" height={220} />

@@ -1,0 +1,47 @@
+{
+  "name": "@pixi-silk/site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync-assets": "node scripts/sync-assets.mjs",
+    "api:gen": "typedoc && node scripts/postprocess-api.mjs",
+    "llms:gen": "node scripts/build-llms.mjs",
+    "predev": "pnpm sync-assets && pnpm api:gen && pnpm llms:gen",
+    "prebuild": "pnpm sync-assets && pnpm api:gen && pnpm llms:gen",
+    "dev": "astro dev --port 5178",
+    "build": "astro build && pagefind --site dist && node scripts/precompress.mjs",
+    "preview": "astro preview --port 5178",
+    "typecheck": "astro check && node scripts/check-snippets.mjs",
+    "astro": "astro",
+    "indexnow": "node scripts/indexnow.mjs",
+    "check:seo": "node scripts/check-seo.mjs"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^8.0.0",
+    "@astrojs/react": "^7.0.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "astro": "^7.3.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.43.0",
+    "pixi-silk": "workspace:*",
+    "pixi.js": "^8.21.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "sharp": "^0.35.4",
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4.3.3"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.10",
+    "@astrojs/markdown-remark": "^7.3.0",
+    "@resvg/resvg-js": "^2.6.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "pagefind": "^1.5.2",
+    "satori": "^0.33.4",
+    "typedoc": "^0.28.20",
+    "typedoc-plugin-markdown": "^4.13.0",
+    "typescript": "^6.0.3",
+    "yaml": "^2.9.0"
+  }
+}

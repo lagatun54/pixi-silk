@@ -1,0 +1,45 @@
+{
+  "name": "pixi-silk-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "description": "pixi-silk monorepo: smooth, analytic anti-aliased vector graphics for PixiJS v8, and its docs site.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "packageManager": "pnpm@10.32.1",
+  "scripts": {
+    "build": "pnpm --filter pixi-silk build",
+    "build:all": "node scripts/build-all-publishable.mjs",
+    "test": "pnpm lint && pnpm --filter pixi-silk test",
+    "typecheck": "pnpm --filter pixi-silk typecheck && pnpm --filter @pixi-silk/site typecheck",
+    "lint": "biome check . && pnpm lint:prose",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "lint:prose": "node scripts/check-prose.mjs",
+    "check:publish-contents": "node scripts/check-publish-contents.mjs",
+    "check:pages": "node scripts/check-pages.mjs",
+    "site:dev": "pnpm --filter @pixi-silk/site dev",
+    "site:build": "pnpm --filter @pixi-silk/site build",
+    "site:preview": "pnpm --filter @pixi-silk/site preview",
+    "changeset": "changeset",
+    "changeset:status": "changeset status",
+    "version-packages": "changeset version && pnpm install --lockfile-only",
+    "release": "pnpm build:all && changeset publish",
+    "size": "node scripts/size-check.mjs",
+    "size:check": "node scripts/size-check.mjs --check",
+    "size:update": "node scripts/size-check.mjs --update",
+    "commitlint": "commitlint --edit",
+    "prepare": "husky || true"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.14",
+    "@changesets/changelog-github": "^1.0.1",
+    "@changesets/cli": "^3.0.2",
+    "@commitlint/cli": "^21.2.2",
+    "@commitlint/config-conventional": "^21.2.2",
+    "husky": "^9.1.7",
+    "playwright-core": "^1.63.0",
+    "rolldown": "^1.2.11"
+  }
+}

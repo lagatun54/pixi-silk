@@ -1,0 +1,44 @@
+---
+import Base from '@/layouts/Base.astro';
+import { breadcrumbLd } from '@/lib/seo';
+import { SITE } from '@/lib/site';
+
+const sections = [['', 'All'], ['Docs', 'Docs'], ['API reference', 'API'], ['FAQ', 'FAQ'], ['Lab', 'Lab'], ['Showcase', 'Showcase']];
+---
+
+<Base title={`Search the docs | ${SITE.name}`} description={`Search the ${SITE.name} docs, API reference, FAQ and lab: anti-aliasing, smooth shapes, gradients, charts and more for PixiJS v8.`} path="/search/" noIndex jsonLd={[breadcrumbLd([{ name: SITE.name, url: '/' }, { name: 'Search', url: '/search/' }])]}>
+    <div class="container-page max-w-3xl py-14">
+        <h1 class="text-4xl font-semibold tracking-tight">Search</h1>
+        <search class="mt-6 block">
+            <form action="/search/" method="get">
+                <label for="q" class="sr-only">Search the docs</label>
+                <input id="q" name="q" type="search" autocomplete="off" placeholder="anti-aliasing, squircle, gradient banding" class="w-full rounded-lg border bg-card px-4 py-3 text-base outline-none focus:border-foreground/40" />
+            </form>
+        </search>
+        <fieldset class="mt-3 flex min-w-0 flex-wrap gap-1.5 text-xs">
+            <legend class="sr-only">Filter results</legend>
+            {sections.map(([value, label], i) => (
+                <button type="button" class="page-chip rounded-full border px-2.5 py-1 text-muted-foreground aria-pressed:bg-foreground aria-pressed:text-background" data-section={value} aria-pressed={i === 0 ? 'true' : 'false'}>{label}</button>
+            ))}
+        </fieldset>
+        <ul id="page-results" class="mt-6 space-y-1 text-sm"></ul>
+        <noscript><p class="mt-6 text-muted-foreground">Search needs JavaScript. Browse the <a class="underline" href="/docs/">docs</a> or read <a class="underline" href="/llms-full.txt">llms-full.txt</a>.</p></noscript>
+    </div>
+</Base>
+<script is:inline>
+    (() => {
+        const input = document.getElementById('q');
+        const search = window.silkSearch.bind({
+            input,
+            list: document.getElementById('page-results'),
+            chips: [...document.querySelectorAll('.page-chip')],
+            limit: 30,
+            onQuery: (q) => history.replaceState(null, '', q ? `?q=${encodeURIComponent(q)}` : location.pathname),
+        });
+        const initial = new URLSearchParams(location.search).get('q') ?? '';
+
+        input.value = initial;
+        input.focus();
+        if (initial) search.run(initial);
+    })();
+</script>

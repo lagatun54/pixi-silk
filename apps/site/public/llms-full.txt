@@ -1,0 +1,4521 @@
+# pixi-silk
+
+> Smooth vector graphics for PixiJS v8. pixi-silk draws shapes as exact signed distance fields, so every edge is anti-aliased per pixel. Edges stay smooth at any zoom, rotation and device pixel ratio, without MSAA, and each object is one draw call.
+
+pixi-silk 0.1.0 is an MIT-licensed TypeScript library. It needs pixi.js ^8 (peer dependency) and WebGL2.
+- `SilkGraphics` is a display object with a Graphics-like API. It draws rects and squircles (per-corner radii), circles, ellipses, arcs, sectors, lines, polylines (smoothed or tapered), Bezier paths (stroke only), chart areas, hearts, stars, polygons and rounded triangles.
+- Paint: colours, gradients (linear, radial, conic, along the path), a gaussian `blur` for glows and soft shadows, dashes and dots. Gradients mix in OKLab and are dithered. Strokes align inside, center or outside.
+- `createSilkApp` creates a Pixi Application whose canvas maps 1:1 to device pixels, even at fractional ratios. It follows DPR changes, uses no MSAA and renders filters at screen resolution.
+- Also: transforms (save, restore, translate, rotate, scale), hit testing against the real shapes, and motion helpers (damp, Spring, ease).
+- Limits: WebGL2 only, no WebGPU yet. Free-form paths are stroke-only. Joins are always round.
+
+Site: https://pixi-silk.schmooky.dev
+Repository: https://github.com/schmooky/pixi-silk
+Package: https://www.npmjs.com/package/pixi-silk
+
+This file contains the complete documentation: every guide (live demos are inlined as their TypeScript source), the API reference and the FAQ.
+
+## Quick start
+
+```bash
+npm install pixi-silk pixi.js
+```
+
+```ts
+import { createSilkApp, SilkGraphics, conic, vertical } from 'pixi-silk';
+
+const { app } = await createSilkApp({ parent: document.getElementById('stage')!, background: 0x000000 });
+const g = new SilkGraphics();
+
+g.roundRect(10, 10, 340, 140, 22, 0.6).fill(0x1c1c1e);                        // squircle card
+g.arcSweep(80, 80, 44, -Math.PI / 2, Math.PI * 1.5)
+    .stroke({ width: 12, cap: 'round', gradient: conic([0x30d158, 0xffd60a, 0xff453a]) });
+g.area([120, 100, 170, 80, 220, 92, 270, 60, 320, 70], 130, { smooth: 'monotone' })
+    .fill(vertical([[0, 0xff9f0a, 0.8], [1, 0xff9f0a, 0]]))
+    .stroke({ width: 2, color: 0xff9f0a, cap: 'round' });
+app.stage.addChild(g);
+```
+
+---
+
+# Introduction
+
+URL: https://pixi-silk.schmooky.dev/docs/introduction/
+Section: Getting started
+
+> pixi-silk is a Graphics-like object for PixiJS v8. It draws shapes as exact signed distance fields, so edges stay smooth and anti-aliased at any zoom and DPR.
+
+pixi-silk adds `SilkGraphics`, a PixiJS v8 display object with an API close to Pixi's `Graphics`.
+It does not turn shapes into triangles. The GPU evaluates each shape's exact distance function at
+every pixel and derives coverage from it. The anti-aliasing is exact at every scale, without MSAA
+or extra render passes.
+
+Live demo `versus` (source):
+
+```ts
+import { Container, Graphics, Text } from 'pixi.js';
+import { SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+// Left: Pixi v8 Graphics (tessellated, no MSAA). Right: SilkGraphics (distance fields).
+export default defineDemo({
+    size: [480, 240],
+    controls: {
+        zoom: { type: 'range', label: 'zoom', min: 1, max: 6, step: 0.01, value: 1 },
+        spin: { type: 'toggle', label: 'rotate', value: true },
+    },
+    setup({ stage, params, tick }) {
+        const sides = [new Container(), new Container()];
+        const pixi = new Graphics();
+        const silk = new SilkGraphics();
+
+        sides[0].addChild(pixi);
+        sides[1].addChild(silk);
+        sides.forEach((side, i) => {
+            const mask = new Graphics().rect(i * 240, 0, 240, 240).fill(0xffffff);
+            const label = new Text({
+                text: i ? 'SilkGraphics' : 'Graphics',
+                style: { fill: 0x8e8e93, fontSize: 12, fontFamily: 'system-ui' },
+            });
+
+            label.position.set(i * 240 + 12, 10);
+            side.mask = mask;
+            stage.addChild(side, mask, label);
+        });
+        let angle = 0;
+
+        tick((_t, dt) => {
+            if (params.spin) angle += dt * 0.15;
+            for (const [i, side] of sides.entries()) {
+                side.pivot.set(120, 130);
+                side.position.set(i * 240 + 120, 130);
+                side.scale.set(params.zoom);
+                side.rotation = angle;
+            }
+            for (const g of [pixi, silk]) {
+                g.clear();
+                g.circle(120, 130, 62).stroke({ width: 3, color: 0x64d2ff });
+                g.roundRect(70, 90, 100, 80, 24).stroke({ width: 1, color: 0xffffff });
+                g.circle(120, 130, 18).fill(0xff375f);
+                for (let k = 0; k < 6; k++)
+                    g.moveTo(40, 60 + k * 3)
+                        .lineTo(200, 64 + k * 5)
+                        .stroke({ width: 0.6, color: 0xffd60a });
+            }
+        });
+    },
+});
+```
+
+## Why v8 graphics stopped looking smooth
+
+PixiJS v8 builds `Graphics` geometry once, as triangles, when you draw. That is fast, but it has
+limits:
+
+- **Curves** are tessellated. Scale a circle up and its facets show. A thin line crawls between
+  pixel rows as it moves.
+- **Anti-aliasing** is MSAA or nothing. `antialias: true` gives four samples per pixel on the main
+  canvas. Filters and render textures stay aliased unless you opt each one into MSAA.
+- **Filters** render at resolution 1, so anything behind a filter is blurry on retina screens.
+- **Gradients** are 8-bit, so wide, dark gradients show bands.
+
+## What Silk does instead
+
+| | Pixi `Graphics` | `SilkGraphics` |
+|---|---|---|
+| Edges | tessellated triangles, optional MSAA | exact distance per pixel, 1-device-pixel filter |
+| Zoom | facets appear | exact at any scale |
+| Thin lines | break up below 1 px | keep 1 px and fade (energy conserving) |
+| Inside filters and render textures | aliased unless each target opts into MSAA | same quality everywhere |
+| Gradients | sRGB, 8-bit | OKLab, half-float ramps, dithered |
+| Draw calls | batched geometry | one instanced draw call per object |
+
+## Key facts
+
+- One `SilkGraphics` is one draw call, whatever it contains. Each primitive is one quad instance.
+  Rebuilding 50,000 primitives every frame costs about 12 ms of CPU.
+- Shapes: rects and squircles (per-corner radii, continuous curvature), circles, ellipses, arcs,
+  sectors, lines, polylines (smoothed, tapered), paths, areas between two series, hearts, stars,
+  regular polygons and rounded triangles.
+- Paint: solid colours, gradients (linear, radial, conic and along-the-path), analytic gaussian
+  blur for glows and soft shadows, and shader-side dashes.
+- `createSilkApp` creates a Pixi `Application` whose canvas maps 1:1 to device pixels, even at
+  fractional ratios like 1.5 or 2.625. It follows DPR changes.
+- pixi-silk is written in TypeScript, renders with WebGL2 and is MIT licensed. `pixi.js` ^8 is a
+  peer dependency.
+
+## Where to next
+
+- [Install it](https://pixi-silk.schmooky.dev/docs/installation/), then follow the [quick start](https://pixi-silk.schmooky.dev/docs/quick-start/).
+- Coming from `Graphics`? Read [Migrating from Graphics](https://pixi-silk.schmooky.dev/docs/migrating-from-graphics/).
+- Curious how the shader works? See [How it works](https://pixi-silk.schmooky.dev/docs/how-it-works/).
+- Want to see everything at once? Browse the [Lab](https://pixi-silk.schmooky.dev/lab/) and the [Showcase](https://pixi-silk.schmooky.dev/showcase/).
+
+---
+
+# Installation
+
+URL: https://pixi-silk.schmooky.dev/docs/installation/
+Section: Getting started
+
+> Install pixi-silk with npm, pnpm, yarn or bun next to pixi.js v8. It needs WebGL2 and ships tree-shakeable ESM with TypeScript types, about 15 kB gzipped.
+
+pixi-silk is on npm. Its one peer dependency is `pixi.js` version 8.
+
+```bash
+npm install pixi-silk pixi.js
+```
+
+```bash
+pnpm add pixi-silk pixi.js
+```
+
+```bash
+yarn add pixi-silk pixi.js
+```
+
+```bash
+bun add pixi-silk pixi.js
+```
+
+## Import
+
+Import everything from the package root. The package is ESM only, with one file per module and
+TypeScript declarations. CommonJS code can still `require()` it on Node 20.19+ and 22.12+. Your
+bundler keeps only what you import, because the package is side-effect free. `SilkGraphics` with
+its shader is about 15 kB gzipped. The motion helpers alone are under 0.5 kB.
+
+```ts
+import { createSilkApp, SilkGraphics, linear, conic } from 'pixi-silk';
+```
+
+## Requirements
+
+- PixiJS 8.6 or newer. `pixi.js` is a peer dependency, so your app owns the renderer.
+- WebGL2, which every current browser supports. The WebGPU renderer is not supported yet. Create
+  your application with `preference: 'webgl'`. `createSilkApp` does this for you.
+- Any bundler that understands ES modules (Vite, webpack, Rollup, esbuild, Parcel), or a
+  `<script type="module">` with an import map.
+
+## Without a bundler
+
+```html
+<script type="importmap">
+  { "imports": {
+      "pixi.js": "https://cdn.jsdelivr.net/npm/pixi.js@8/dist/pixi.min.mjs",
+      "pixi-silk": "https://cdn.jsdelivr.net/npm/pixi-silk/dist/index.js"
+  } }
+</script>
+<script type="module">
+  import { createSilkApp, SilkGraphics } from 'pixi-silk';
+</script>
+```
+
+Next, read the [quick start](https://pixi-silk.schmooky.dev/docs/quick-start/).
+
+---
+
+# Quick start
+
+URL: https://pixi-silk.schmooky.dev/docs/quick-start/
+Section: Getting started
+
+> Create a DPR-exact PixiJS app with createSilkApp, then draw a squircle card, a gradient gauge and an area chart with SilkGraphics.
+
+Build the card below: a squircle background, a gauge whose conic gradient follows the arc, and a
+smoothed area chart with a fading fill.
+
+Live demo `quick-start` (source):
+
+```ts
+import { conic, SilkGraphics, vertical } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+const GAUGE = conic([0x30d158, 0xffd60a, 0xff453a]);
+const FILL = vertical(
+    [
+        [0, 0xff9f0a, 0.8],
+        [1, 0xff9f0a, 0],
+    ],
+    { easing: 'smooth' },
+);
+
+export default defineDemo({
+    size: [360, 160],
+    controls: {
+        progress: { type: 'range', label: 'progress', min: 0, max: 1, step: 0.01, value: 0.72 },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+
+        stage.addChild(g);
+        tick((t) => {
+            const wave = [120, 100, 170, 80, 220, 92, 270, 60, 320, 70].map((v, i) =>
+                i % 2 ? v + Math.sin(t + i) * 6 : v,
+            );
+
+            g.clear();
+            g.roundRect(10, 10, 340, 140, 22, 0.6).fill(0x1c1c1e); // squircle card
+            g.arcSweep(80, 80, 44, -Math.PI / 2, Math.PI * 2).stroke({ width: 12, color: 0x2c2c2e });
+            g.arcSweep(80, 80, 44, -Math.PI / 2, Math.PI * 2 * params.progress).stroke({
+                width: 12,
+                cap: 'round',
+                gradient: GAUGE,
+            }); // gauge follows the arc
+            g.area(wave, 130, { smooth: 'monotone' })
+                .fill(FILL) // chart fill ...
+                .stroke({ width: 2, color: 0xff9f0a, cap: 'round' }); // ... and its top line
+        });
+    },
+});
+```
+
+## 1. Create the application
+
+`createSilkApp` is a thin wrapper around `new Application()` and `app.init()`. It sizes the canvas
+in device pixels and turns MSAA off, because Silk's anti-aliasing is analytic.
+
+```ts
+import { createSilkApp } from 'pixi-silk';
+
+const { app } = await createSilkApp({
+    parent: document.getElementById('stage')!, // the canvas fills this element
+    background: 0x000000,
+});
+```
+
+You can also keep your own `Application`. See [Resolution & DPR](https://pixi-silk.schmooky.dev/docs/resolution/) for the
+settings that matter.
+
+## 2. Draw
+
+`SilkGraphics` works like Pixi's `Graphics`. Add shapes to the active path, then `fill()` or
+`stroke()` them. Calls chain.
+
+```ts
+import { SilkGraphics, conic, vertical } from 'pixi-silk';
+
+const GAUGE = conic([0x30d158, 0xffd60a, 0xff453a]); // spans whatever arc it is drawn on
+const g = new SilkGraphics();
+
+g.roundRect(10, 10, 340, 140, 22, 0.6).fill(0x1c1c1e); // radius 22, squircle smoothing 0.6
+g.arcSweep(80, 80, 44, -Math.PI / 2, Math.PI * 1.5).stroke({ width: 12, cap: 'round', gradient: GAUGE });
+g.area([120, 100, 170, 80, 220, 92, 270, 60, 320, 70], 130, { smooth: 'monotone' })
+    .fill(vertical([[0, 0xff9f0a, 0.8], [1, 0xff9f0a, 0]]))
+    .stroke({ width: 2, color: 0xff9f0a, cap: 'round' });   // stroke right after fill draws the top line
+
+app.stage.addChild(g);
+```
+
+## 3. Animate
+
+Redrawing every frame is cheap. `clear()` keeps the GPU buffers, and all primitives go out in one
+instanced draw call.
+
+```ts
+app.ticker.add((ticker) => {
+    const t = ticker.lastTime / 1000;
+
+    g.clear();
+    g.arcSweep(80, 80, 44, -Math.PI / 2, Math.PI * 2 * (0.5 + 0.4 * Math.sin(t)))
+        .stroke({ width: 12, cap: 'round', gradient: GAUGE });
+});
+```
+
+> **Reuse gradient objects**
+> Create gradients once, at module scope, and reuse them. Ramps with the same stops share one row of
+> the gradient atlas either way. Reusing the object saves re-parsing the stops every frame.
+
+## Next steps
+
+- All the shapes: [Shapes](https://pixi-silk.schmooky.dev/docs/shapes/), [Arcs & rings](https://pixi-silk.schmooky.dev/docs/arcs-and-rings/), [Lines & paths](https://pixi-silk.schmooky.dev/docs/lines-and-paths/).
+- Paint: [Gradients](https://pixi-silk.schmooky.dev/docs/gradients/), [Blur, glows & shadows](https://pixi-silk.schmooky.dev/docs/blur-and-shadows/).
+- The [Lab](https://pixi-silk.schmooky.dev/lab/) has complete examples: 35 full-screen pages, including five reference sheets rebuilt 1:1.
+
+---
+
+# Migrating from Graphics
+
+URL: https://pixi-silk.schmooky.dev/docs/migrating-from-graphics/
+Section: Getting started
+
+> SilkGraphics mirrors the PixiJS v8 Graphics API: shapes on a path, fill and stroke, transforms. See what is the same, what differs and what is new.
+
+Most `Graphics` code works after renaming the class:
+
+```diff
+- const g = new Graphics();
++ const g = new SilkGraphics();
+  g.roundRect(0, 0, 200, 80, 16).fill(0x1c1c1e).stroke({ width: 2, color: 0xffffff });
+  g.circle(40, 40, 12).fill({ color: 0xff375f, alpha: 0.8 });
+  g.moveTo(0, 100).lineTo(200, 120).stroke({ width: 1, color: 0xffffff });
+```
+
+## Same
+
+- **Active path.** `rect().circle().fill()` fills both shapes. Calling `stroke()` right after
+  `fill()` strokes the same shapes. Each shape stays one instance.
+- **Style objects**: `fill(color)`, `fill({ color, alpha })`, `stroke({ width, color, alpha, alignment, cap })`.
+  `alignment` accepts Pixi's numbers (1 inside, 0.5 centre, 0 outside) and the words
+  `'inside' | 'center' | 'outside'`.
+- **Path commands**: `moveTo`, `lineTo`, `quadraticCurveTo`, `bezierCurveTo`, `arc`, `closePath`,
+  `beginPath`.
+- **Transforms**: `save`, `restore`, `translateTransform`, `rotateTransform`, `scaleTransform`,
+  `setTransform`, `resetTransform`.
+- It is a regular display object. Position, mask and filter it, or put it in a render texture.
+  Give it `eventMode` and listen to pointer events. Hit tests use the real shape.
+
+## Different
+
+| `Graphics` | `SilkGraphics` |
+|---|---|
+| `fill()` on any polygon or path | fills closed primitives (rects, ellipses, sectors, polygons, stars, hearts, triangles) and areas. Free-form paths are stroke-only for now. |
+| miter, bevel and round joins | always round (`join` is accepted and ignored) |
+| `texture` fills | not supported (use gradients) |
+| `svg()` | not supported |
+| batched with other graphics | one draw call per `SilkGraphics`, not batched across objects |
+
+## New things you can use
+
+- `roundRect(x, y, w, h, radius | [tl, tr, br, bl], smoothing)` for squircles.
+- `arcSweep`, `sector` (donuts, pies, rounded gauge segments), `pill`, `heart`, `star` and `triangle` with rounded corners.
+- `polyline(points, { smooth: 'monotone' | 'catmull' })` and tapered widths with `stroke({ width: [2, 12] })`.
+- `area(points, baseline | lowerPoints)` for charts and bands.
+- `dash` and `dashOffset` on any stroke, `blur` on any paint, and gradients in OKLab.
+
+---
+
+# Anti-aliasing in PixiJS v8
+
+URL: https://pixi-silk.schmooky.dev/docs/antialiasing-in-pixijs/
+Section: Smooth graphics
+
+> Compare six ways to get smooth graphics in PixiJS v8: MSAA, higher resolution, curve smoothness, supersampling, FXAA and analytic SDF anti-aliasing.
+
+Anti-aliasing removes the jagged "staircase" edges of shapes on a pixel grid. It gives each edge
+pixel a partial colour, proportional to how much of it the shape covers. PixiJS v8 has five
+practical options: MSAA (`antialias: true`), a higher resolution, finer curve tessellation,
+supersampling and post-process FXAA. pixi-silk adds a sixth, **analytic anti-aliasing**. It
+computes coverage from each shape's exact signed distance field, so it is exact at any zoom,
+rotation and device pixel ratio.
+
+Live demo `versus` (source):
+
+```ts
+import { Container, Graphics, Text } from 'pixi.js';
+import { SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+// Left: Pixi v8 Graphics (tessellated, no MSAA). Right: SilkGraphics (distance fields).
+export default defineDemo({
+    size: [480, 240],
+    controls: {
+        zoom: { type: 'range', label: 'zoom', min: 1, max: 6, step: 0.01, value: 1 },
+        spin: { type: 'toggle', label: 'rotate', value: true },
+    },
+    setup({ stage, params, tick }) {
+        const sides = [new Container(), new Container()];
+        const pixi = new Graphics();
+        const silk = new SilkGraphics();
+
+        sides[0].addChild(pixi);
+        sides[1].addChild(silk);
+        sides.forEach((side, i) => {
+            const mask = new Graphics().rect(i * 240, 0, 240, 240).fill(0xffffff);
+            const label = new Text({
+                text: i ? 'SilkGraphics' : 'Graphics',
+                style: { fill: 0x8e8e93, fontSize: 12, fontFamily: 'system-ui' },
+            });
+
+            label.position.set(i * 240 + 12, 10);
+            side.mask = mask;
+            stage.addChild(side, mask, label);
+        });
+        let angle = 0;
+
+        tick((_t, dt) => {
+            if (params.spin) angle += dt * 0.15;
+            for (const [i, side] of sides.entries()) {
+                side.pivot.set(120, 130);
+                side.position.set(i * 240 + 120, 130);
+                side.scale.set(params.zoom);
+                side.rotation = angle;
+            }
+            for (const g of [pixi, silk]) {
+                g.clear();
+                g.circle(120, 130, 62).stroke({ width: 3, color: 0x64d2ff });
+                g.roundRect(70, 90, 100, 80, 24).stroke({ width: 1, color: 0xffffff });
+                g.circle(120, 130, 18).fill(0xff375f);
+                for (let k = 0; k < 6; k++)
+                    g.moveTo(40, 60 + k * 3)
+                        .lineTo(200, 64 + k * 5)
+                        .stroke({ width: 0.6, color: 0xffd60a });
+            }
+        });
+    },
+});
+```
+
+## The options at a glance
+
+| Technique | How to enable in PixiJS v8 | Edge quality | Cost | Applies to |
+|---|---|---|---|---|
+| MSAA | `app.init({ antialias: true })` | 4 samples, so 5 coverage levels per edge pixel | memory bandwidth, resolve pass | main canvas (render textures and filters opt in) |
+| Higher resolution | `resolution: devicePixelRatio, autoDensity: true` | smaller stairs, still aliased | fill rate grows with DPR squared | everything |
+| Curve smoothness | `app.init({ bezierSmoothness: 0.9 })` | fewer facets on curves, edges still aliased | more triangles | Graphics curves |
+| Supersampling (SSAA) | render into a 2x render texture, then draw it scaled down | high | 4x pixels, extra texture | what you render into it |
+| FXAA | a post-process filter | softened edges, blurred detail and text | one full-screen pass | the filtered object |
+| **Analytic SDF (pixi-silk)** | `new SilkGraphics()` | exact coverage, continuous | one instanced draw call | everywhere, including filters and render textures |
+
+## How to enable MSAA in PixiJS v8
+
+```ts
+import { Application, Graphics } from 'pixi.js';
+
+const app = new Application();
+await app.init({
+    antialias: true,                        // MSAA on the main canvas (WebGL context attribute)
+    resolution: window.devicePixelRatio,    // render at device resolution
+    autoDensity: true,                      // keep the CSS size
+});
+```
+
+MSAA belongs to each render target, so it does not follow your objects everywhere:
+
+- **Render textures** are not multisampled unless you create them with `antialias: true`.
+- **Filters** render into their own targets with `antialias: 'off'` by default (`'on'` or
+  `'inherit'` changes it). They also render at `resolution: 1` unless you raise it.
+- **Thin lines** below one pixel still break up. Four samples cannot represent a line that covers a
+  tenth of a pixel.
+
+## Why MSAA is not enough for 2D UI
+
+MSAA samples coverage at four fixed points per pixel. That is fine for large shapes at rest. The
+things UI and charts are made of show its limits:
+
+- Slowly moving or rotating edges jump between the five coverage levels, which reads as shimmer.
+- Hairlines and small text-like strokes fall between samples and look dotted.
+- Zooming reveals the tessellation of curves, because Graphics fixed its triangles when you drew.
+- Fractional DPRs (1.25, 1.5, 2.625) add resampling blur, unless the canvas backing store matches
+  the device pixels exactly.
+
+## Analytic anti-aliasing with signed distance fields
+
+A signed distance field (SDF) gives the distance from any point to the shape's edge. pixi-silk
+evaluates each primitive's exact SDF per pixel. It turns the distance into coverage over exactly
+one device pixel:
+
+```glsl
+float px = sqrt(abs(dFdx(p).x * dFdy(p).y - dFdx(p).y * dFdy(p).x)); // one device pixel, in shape units
+float coverage = clamp(0.5 - d / px, 0.0, 1.0);                        // d: signed distance to the edge
+```
+
+The result is right at any scale, rotation, resolution and render target, because the pixel size
+comes from screen-space derivatives. There is nothing to tessellate and no samples to miss. See
+[How it works](https://pixi-silk.schmooky.dev/docs/how-it-works/) for details.
+
+```ts
+import { createSilkApp, SilkGraphics } from 'pixi-silk';
+
+const { app } = await createSilkApp({ parent: document.body });   // antialias: false, DPR-exact canvas
+const g = new SilkGraphics();
+
+g.circle(200, 150, 80).stroke({ width: 2, color: 0x64d2ff });     // smooth at any zoom
+g.roundRect(100, 60, 200, 180, 40, 0.6).stroke({ width: 0.5, color: 0xffffff }); // a clean hairline
+app.stage.addChild(g);
+```
+
+## Which one should you use?
+
+- For sprites and textures only, skip MSAA. The GPU filters textures.
+- For occasional large shapes and no zoom, use `antialias: true` plus `resolution: devicePixelRatio`.
+- For UI, charts, icons, thin lines and zoomable or rotating vector content, use analytic
+  anti-aliasing with `SilkGraphics`. Keep `antialias: false` to save multisample bandwidth.
+- For content behind filters or in render textures, SilkGraphics keeps its quality. With Graphics,
+  opt those targets into MSAA and raise the filter resolution.
+
+## References
+
+- PixiJS v8 [Graphics API](https://pixijs.download/release/docs/scene.Graphics.html) and the
+  [issue on smoother curves in v8](https://github.com/pixijs/pixijs/issues/9831).
+- Inigo Quilez, [2D distance functions](https://iquilezles.org/articles/distfunctions2d/).
+- web.dev, [Pixel-perfect rendering with devicePixelContentBox](https://web.dev/articles/device-pixel-content-box).
+- Glossary: [MSAA](https://pixi-silk.schmooky.dev/docs/glossary/#msaa), [SSAA](https://pixi-silk.schmooky.dev/docs/glossary/#ssaa), [FXAA](https://pixi-silk.schmooky.dev/docs/glossary/#fxaa),
+  [signed distance field](https://pixi-silk.schmooky.dev/docs/glossary/#signed-distance-field).
+
+---
+
+# Smooth graphics in PixiJS v8
+
+URL: https://pixi-silk.schmooky.dev/docs/smooth-graphics-pixijs/
+Section: Smooth graphics
+
+> Find the cause and fix for jagged edges, faceted circles, flickering thin lines, blurry retina canvases, blurry filters and banded gradients in PixiJS v8.
+
+Graphics in PixiJS v8 look rough for several reasons. Find your symptom below. Each section gives
+the cause, then the fix. Most fixes work with plain `Graphics`, and each ends with the pixi-silk
+equivalent.
+
+## Jagged, stair-stepped edges
+
+Anti-aliasing is off. `antialias` is `false` unless you set it, so every edge pixel is fully in or
+fully out.
+
+Turn on MSAA with `await app.init({ antialias: true })`. Or draw with `SilkGraphics`, which
+computes exact edge coverage without MSAA. See [Anti-aliasing in PixiJS v8](https://pixi-silk.schmooky.dev/docs/antialiasing-in-pixijs/).
+
+## Circles and curves look like polygons when zoomed
+
+Graphics turns curves into a fixed number of segments when you draw them. Scaling the object up
+later reveals the facets.
+
+Raise `bezierSmoothness` (0 to 1, default 0.5) in `app.init()`, or redraw at the final scale. Or
+use SilkGraphics. It evaluates circles, arcs and rounded corners exactly per pixel, at any zoom.
+
+## Thin lines flicker, look dotted or disappear
+
+A line thinner than one device pixel covers only a fraction of each pixel. Point samples (and
+MSAA's four samples) hit it on some pixels and miss it on others. The pattern changes as the line
+moves.
+
+Keep strokes at least one device pixel wide and fade them instead. SilkGraphics does this for you
+with energy-conserving hairlines:
+
+Live demo `hairlines` (source):
+
+```ts
+import { SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+// Lines thinner than a device pixel keep one pixel of width and fade instead of breaking up.
+export default defineDemo({
+    size: [480, 220],
+    controls: {
+        scale: { type: 'range', label: 'width scale', min: 0.05, max: 2, step: 0.01, value: 0.5 },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+
+        stage.addChild(g);
+        tick((t) => {
+            g.clear();
+            for (let i = 0; i < 24; i++) {
+                const a = -Math.PI / 2 + (i / 23) * Math.PI + Math.sin(t * 0.3) * 0.05;
+                const w = (0.1 + i * 0.12) * params.scale;
+
+                g.line(240, 200, 240 + Math.cos(a) * 220, 200 + Math.sin(a) * 190).stroke({
+                    width: w,
+                    color: 0xffffff,
+                });
+            }
+        });
+    },
+});
+```
+
+## Everything is slightly blurry on retina or HiDPI screens
+
+The canvas has fewer pixels than the screen. Either `resolution` is 1, or the browser scales a
+canvas sized in CSS pixels. Or the size was rounded at a fractional DPR (1.25, 1.5), so the
+browser resamples it.
+
+Call `app.init({ resolution: window.devicePixelRatio, autoDensity: true })` and size the backing
+store from `devicePixelContentBoxSize`. `createSilkApp` does both and follows DPR changes:
+
+Live demo `resolution` (source):
+
+```ts
+import { SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+// A Siemens star is the hardest test for anti-aliasing: every wedge narrows below a pixel.
+export default defineDemo({
+    size: [480, 240],
+    controls: {
+        resolution: { type: 'select', label: 'resolution', options: ['device', '1x', '2x', '3x'], value: 'device' },
+    },
+    setup({ silk, stage, params, tick }) {
+        const g = new SilkGraphics();
+        let applied = '';
+
+        stage.addChild(g);
+        for (let i = 0; i < 36; i++) {
+            const a = (i / 36) * Math.PI * 2;
+
+            g.sector(240, 120, 110, a, a + Math.PI / 36).fill(0xffffff);
+        }
+        g.circle(240, 120, 110).stroke({ width: 1, color: 0x636366 });
+        tick(() => {
+            if (params.resolution === applied) return;
+            applied = params.resolution;
+            // createSilkApp sizes the backing store in device pixels; force 1x/2x/3x to compare
+            silk.setResolution(applied === 'device' ? null : Number(applied[0]));
+        });
+    },
+});
+```
+
+## Content behind a filter is blurry
+
+Filters render into their own texture at `resolution: 1` by default.
+
+Set `Filter.defaultOptions.resolution = 'inherit'` before you create filters, or pass `resolution`
+to each filter. `createSilkApp` sets this default for you.
+
+## Gradients show visible bands
+
+The cause is 8-bit colour. A dark gradient across 1000 pixels may have only 20 distinct values.
+
+The fix is dithering. Pixi's `FillGradient` has no dither option. pixi-silk bakes gradients in half
+floats, interpolates in OKLab and dithers every sample by plus or minus half an 8-bit step. See
+[Gradients](https://pixi-silk.schmooky.dev/docs/gradients/#no-banding).
+
+## Slow motion snaps from pixel to pixel
+
+`roundPixels: true` (on the renderer or the object) rounds positions to whole pixels.
+
+Keep `roundPixels: false` for smoothly animated vector content. With analytic anti-aliasing,
+sub-pixel positions render correctly.
+
+## Checklist
+
+```ts
+import { createSilkApp, SilkGraphics } from 'pixi-silk';
+
+const { app } = await createSilkApp({ parent: el });   // DPR-exact canvas, filters at screen resolution
+const g = new SilkGraphics();                          // exact anti-aliasing, hairlines, dithered gradients
+app.stage.addChild(g);
+```
+
+---
+
+# @pixi/graphics-smooth and PixiJS v8
+
+URL: https://pixi-silk.schmooky.dev/docs/graphics-smooth-v8/
+Section: Smooth graphics
+
+> @pixi/graphics-smooth, the anti-aliased Graphics plugin, targets PixiJS v7. For smooth, anti-aliased lines and shapes on PixiJS v8, use SilkGraphics.
+
+[`@pixi/graphics-smooth`](https://github.com/pixijs-userland/graphics-smooth) is the community plugin
+that made PixiJS `Graphics` smooth. Its drop-in `SmoothGraphics` class anti-aliases shapes in the
+shader (HHAA), without MSAA. The current release is built for PixiJS v7. Its 1.1 line requires
+PixiJS 7.2 or a newer v7 and was last published in 2024. As of September 2026, there is no v8
+release on npm. If you move to PixiJS v8 and need the same smoothness, use pixi-silk's
+`SilkGraphics`. It fills that role with a v8-style API.
+
+## What changes
+
+| | `@pixi/graphics-smooth` (v7) | `SilkGraphics` (v8) |
+|---|---|---|
+| PixiJS version | 7.x | 8.x |
+| Class | `SmoothGraphics` | `SilkGraphics` |
+| API style | `beginFill`, `lineStyle`, `drawRect`, `endFill` | shapes on a path, then `fill()` or `stroke()` |
+| Anti-aliasing | in the shader, per line or shape | analytic signed distance fields, per pixel |
+| Curves | tessellated | exact circles, ellipses, arcs, rounded corners |
+| Extras | | squircles, dashes, OKLab gradients, blur, tapered strokes, DPR-exact app |
+
+## Porting `SmoothGraphics` code
+
+```ts nocheck
+// PixiJS v7 + @pixi/graphics-smooth
+const g = new SmoothGraphics();
+g.lineStyle({ width: 2, color: 0xffffff });
+g.beginFill(0x1c1c1e);
+g.drawRoundedRect(0, 0, 200, 80, 16);
+g.endFill();
+g.drawCircle(40, 40, 12);
+```
+
+```ts
+// PixiJS v8 + pixi-silk
+const g = new SilkGraphics();
+g.roundRect(0, 0, 200, 80, 16).fill(0x1c1c1e).stroke({ width: 2, color: 0xffffff });
+g.circle(40, 40, 12).stroke({ width: 2, color: 0xffffff });
+```
+
+| v7 call | SilkGraphics (v8) |
+|---|---|
+| `beginFill(c, a)` to `endFill()` | `shape().fill({ color: c, alpha: a })` |
+| `lineStyle({ width, color, alpha })` | `shape().stroke({ width, color, alpha })` |
+| `drawRect`, `drawRoundedRect`, `drawCircle`, `drawEllipse` | `rect`, `roundRect`, `circle`, `ellipse` |
+| `moveTo`, `lineTo`, `bezierCurveTo` | the same, then `stroke()` |
+| `arc(...)` | `arc(...)` (starts its own subpath) or `arcSweep(...)` |
+| `LINE_SCALE_MODE.NONE` (constant screen width) | not built in, so divide the width by the scale (hairlines never drop below 1 px) |
+
+## Also new in PixiJS v8
+
+PixiJS v8 itself changed the Graphics API. It adds `GraphicsContext`, and you now call `fill()` or
+`stroke()` after the shapes. The [PixiJS v8 migration guide](https://pixijs.com/8.x/guides/migrations/v8)
+covers the rest of the upgrade. [Migrating from Graphics](https://pixi-silk.schmooky.dev/docs/migrating-from-graphics/) covers how
+v8 `Graphics` and `SilkGraphics` differ.
+
+---
+
+# Glossary
+
+URL: https://pixi-silk.schmooky.dev/docs/glossary/
+Section: Smooth graphics
+
+> Short definitions of anti-aliasing, MSAA, SSAA, FXAA, signed distance fields, coverage, device pixel ratio, squircles, OKLab, banding and dithering.
+
+This page defines the terms used across these docs. Each entry starts with a one-sentence definition.
+
+- **Aliasing** (jaggies, staircase artifacts): The jagged or crawling edges that appear when you sample a continuous shape at only one point per pixel. Each pixel is then either fully in or fully out.
+- **Analytic anti-aliasing**: Anti-aliasing computed exactly per pixel from the shape's geometry, not from extra samples. pixi-silk derives coverage from the signed distance to the shape and the size of one device pixel.
+- **Anti-aliasing** (antialiasing, AA): Techniques that remove the jagged "staircase" look of edges on a pixel grid. Each edge pixel gets a partial colour proportional to how much of it the shape covers.
+- **Coverage**: The fraction of a pixel's area covered by a shape, from 0 to 1. Anti-aliasing uses coverage as the pixel's opacity along edges.
+- **Device pixel**: One physical pixel of the display. A canvas is sharp only when each of its pixels maps to exactly one device pixel.
+- **Device pixel ratio** (DPR, devicePixelRatio): The number of physical screen pixels per CSS pixel: 1 on standard displays, 2 or 3 on retina or HiDPI screens. Many laptops and phones have fractional ratios such as 1.25 or 1.5.
+- **Dithering**: Adding a little structured noise (here ±½ of an 8-bit step) before quantising. It hides banding and leaves exact colours unchanged.
+- **Draw call**: One command from the CPU telling the GPU to draw. Fewer draw calls usually mean better performance. Each SilkGraphics is one draw call.
+- **FXAA** (fast approximate anti-aliasing): A cheap post-processing filter that detects and blurs high-contrast edges in the finished image. It softens detail and text and cannot recover geometry lost between pixels.
+- **Gradient banding** (colour banding): Visible steps in a smooth gradient caused by 8-bit colour precision, most obvious in dark, wide gradients.
+- **Hairline**: A line thinner than one device pixel. pixi-silk keeps hairlines one pixel wide and scales their opacity with their width, so they fade instead of breaking up.
+- **Instanced rendering** (instancing): Drawing many copies of one mesh in a single draw call, each with its own data. pixi-silk draws every primitive of a SilkGraphics as one instance of a quad.
+- **Monotone interpolation**: A curve through data points that never overshoots them. Peaks stay on the data and flat runs stay flat. pixi-silk uses Steffen's method (like d3's curveMonotoneX) for charts.
+- **MSAA** (multisample anti-aliasing): A GPU technique that stores several coverage samples per pixel (typically 4) and averages them. In PixiJS, you enable it with antialias: true. By default it covers only the main canvas. Filters and render textures must opt in one by one.
+- **OKLab**: A perceptual colour space by Björn Ottosson, where equal steps look equally different. Gradients interpolated in OKLab stay bright and even, without muddy midpoints.
+- **Premultiplied alpha**: Storing colour already multiplied by opacity. Interpolating premultiplied colours prevents dark fringes when a gradient fades to transparent.
+- **Signed distance field** (SDF): A function that returns the distance from any point to the nearest edge of a shape: negative inside, positive outside. Rendering a shape from its SDF gives exact edges at any scale.
+- **Squircle** (superellipse corner, continuous corner): A rounded rectangle whose corners are superellipse arcs, so curvature grows gradually from the straight edge instead of jumping. iOS app icons and cards use it.
+- **SSAA** (supersampling): Anti-aliasing by rendering at a higher resolution and downscaling. It is simple and high quality. Memory and fill-rate costs grow with the scale factor squared.
+- **Tessellation**: Converting curves and shapes into triangles for the GPU. PixiJS Graphics tessellates when you draw, so curves become polygons with a fixed number of segments.
+
+---
+
+# Shapes
+
+URL: https://pixi-silk.schmooky.dev/docs/shapes/
+Section: Drawing
+
+> Rects, squircles with per-corner radii, pills, circles, ellipses, hearts, stars, polygons and rounded triangles, each an exact anti-aliased distance field.
+
+Every shape method adds a primitive to the **active path**. Nothing is drawn until you call
+`fill()` or `stroke()`, which paint everything on the path. Pixi's `Graphics` works the same way.
+
+Live demo `shapes` (source):
+
+```ts
+import { SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+// Every shape is centred on (0, 0) and moved into its cell with the transform stack.
+const SHAPES: { draw: (g: SilkGraphics) => SilkGraphics; color: number; open?: boolean }[] = [
+    { draw: (g) => g.rect(-30, -22, 60, 44), color: 0x0a84ff },
+    { draw: (g) => g.roundRect(-30, -22, 60, 44, 14, 0.6), color: 0x5e5ce6 },
+    { draw: (g) => g.pill(-34, -14, 68, 28), color: 0xbf5af2 },
+    { draw: (g) => g.circle(0, 0, 26), color: 0xff375f },
+    { draw: (g) => g.ellipse(0, 0, 34, 20), color: 0xff9f0a },
+    { draw: (g) => g.arc(0, 0, 26, -2.5, 0.8), color: 0xffd60a, open: true },
+    { draw: (g) => g.sector(0, 0, 30, -2.2, 1.6, 14, 4), color: 0x30d158 },
+    { draw: (g) => g.heart(0, 2, 56, 0.12), color: 0xff453a },
+    { draw: (g) => g.star(0, 0, 5, 30, undefined, 0, 3), color: 0xffd60a },
+    { draw: (g) => g.regularPoly(0, 0, 28, 6, 0, 5), color: 0x64d2ff },
+    { draw: (g) => g.triangle(-30, 22, 30, 22, 0, -28, 6), color: 0xac8e68 },
+    { draw: (g) => g.polyline([-34, 14, -12, -16, 10, 10, 34, -18]), color: 0xffffff, open: true },
+];
+
+export default defineDemo({
+    size: [520, 250],
+    controls: {
+        outline: { type: 'toggle', label: 'outline', value: false },
+        spin: { type: 'toggle', label: 'rotate', value: false },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+
+        stage.addChild(g);
+        tick((t) => {
+            g.clear();
+            SHAPES.forEach((shape, i) => {
+                g.save()
+                    .translateTransform(50 + (i % 6) * 84, 65 + Math.floor(i / 6) * 120)
+                    .rotateTransform(params.spin ? t * 0.6 : 0);
+                const path = shape.draw(g);
+
+                if (shape.open) path.stroke({ width: 5, cap: 'round', color: shape.color });
+                else if (params.outline) path.stroke({ width: 2, color: shape.color });
+                else path.fill(shape.color);
+                g.restore();
+            });
+        });
+    },
+});
+```
+
+## Rectangles and squircles
+
+```ts
+g.rect(x, y, width, height);
+g.roundRect(x, y, width, height, radius);                 // circular corners
+g.roundRect(x, y, width, height, radius, 0.6);            // squircle: continuous curvature
+g.roundRect(x, y, width, height, [24, 24, 8, 8]);         // per corner: tl, tr, br, bl
+g.pill(x, y, width, height);                               // fully round ends
+```
+
+The `smoothing` argument (0 to 1) turns corners into superellipse arcs whose curvature grows
+gradually. App icons and cards on iOS have these corners. iOS uses about `0.6`. A circular corner
+meets the straight side with a jump in curvature, which the eye reads as a slight kink. At the 45°
+point, a smoothed corner is exactly as deep as a circular corner of the same `radius`. So switching
+is a drop-in change.
+
+Live demo `squircle` (source):
+
+```ts
+import { SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+// A squircle keeps curvature continuous where the side meets the corner (iOS icons, cards).
+export default defineDemo({
+    size: [420, 220],
+    controls: {
+        radius: { type: 'range', label: 'radius', min: 0, max: 80, step: 1, value: 48, unit: 'px' },
+        smoothing: { type: 'range', label: 'smoothing', min: 0, max: 1, step: 0.01, value: 0.6 },
+        compare: { type: 'toggle', label: 'circular overlay', value: true },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+
+        stage.addChild(g);
+        tick(() => {
+            g.clear();
+            g.roundRect(110, 20, 200, 180, params.radius, params.smoothing)
+                .fill(0x2c2c2e)
+                .stroke({ width: 2, color: 0x64d2ff });
+            if (params.compare)
+                g.roundRect(110, 20, 200, 180, params.radius).stroke({ width: 1, color: 0xff375f, alpha: 0.8 });
+        });
+    },
+});
+```
+
+## Circles, ellipses and hearts
+
+```ts
+g.circle(cx, cy, radius);
+g.ellipse(cx, cy, radiusX, radiusY);          // exact ellipse distance (Newton solve, no approximation)
+g.heart(cx, cy, width, rounding);             // rounding 0..0.3 puffs it up
+```
+
+## Polygons
+
+```ts
+g.regularPoly(cx, cy, radius, sides, rotation, cornerRadius);   // first vertex points up
+g.star(cx, cy, points, radius, innerRadius, rotation, cornerRadius);
+g.triangle(x0, y0, x1, y1, x2, y2, cornerRadius);
+```
+
+Rounded corners on polygons, stars and triangles are exact, not approximations.
+
+## Rotated shapes
+
+Shapes drawn inside a rotated transform stay exact, because the rotation is part of the primitive.
+See [Transforms](https://pixi-silk.schmooky.dev/docs/transforms/).
+
+```ts
+g.save().translateTransform(100, 100).rotateTransform(Math.PI / 6);
+g.roundRect(-40, -20, 80, 40, 12, 0.6).fill(0x5e5ce6);
+g.restore();
+```
+
+## Fill and stroke together
+
+```ts
+g.roundRect(0, 0, 200, 80, 20, 0.6).fill(0x1c1c1e).stroke({ width: 2, color: 0x3a3a3c });
+```
+
+Calling `stroke()` right after `fill()` merges both into one primitive. The shader splits each
+pixel's coverage exactly between the fill and the stroke band. So there is never a seam or a halo
+between them. See [Fills & strokes](https://pixi-silk.schmooky.dev/docs/fills-and-strokes/).
+
+---
+
+# Arcs, sectors & rings
+
+URL: https://pixi-silk.schmooky.dev/docs/arcs-and-rings/
+Section: Drawing
+
+> Arcs with round, butt or square caps, pie and donut sectors with rounded corners, and activity rings whose conic gradients follow the arc.
+
+Live demo `rings` (source):
+
+```ts
+import { conic, SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+const RINGS = [
+    { r: 78, colors: [0xfa114f, 0xff5e8a] },
+    { r: 58, colors: [0x92e82a, 0xd4ff5a] },
+    { r: 38, colors: [0x1ee0ff, 0x7df9ff] },
+].map((ring) => ({ ...ring, gradient: conic(ring.colors) }));
+
+export default defineDemo({
+    size: [260, 200],
+    controls: {
+        progress: { type: 'range', label: 'progress', min: 0, max: 1.6, step: 0.01, value: 0.8 },
+        cap: { type: 'select', label: 'cap', options: ['round', 'butt', 'square'], value: 'round' },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+
+        stage.addChild(g);
+        tick((t) => {
+            g.clear();
+            RINGS.forEach((ring, i) => {
+                const p = Math.max(0.001, params.progress * (1 - i * 0.18) + Math.sin(t + i) * 0.02);
+
+                g.circle(130, 100, ring.r).stroke({ width: 16, color: ring.colors[0], alpha: 0.18 });
+                // the conic gradient spans whatever arc it is drawn on
+                g.arcSweep(130, 100, ring.r, -Math.PI / 2, Math.PI * 2 * p).stroke({
+                    width: 16,
+                    cap: params.cap as 'round',
+                    gradient: ring.gradient,
+                });
+            });
+        });
+    },
+});
+```
+
+## Arcs
+
+```ts nocheck
+g.arc(cx, cy, radius, startAngle, endAngle, anticlockwise?);   // canvas semantics
+g.arcSweep(cx, cy, radius, startAngle, sweep);                 // signed sweep, clockwise on screen
+```
+
+Arcs are open curves, so you stroke them. `cap` sets the shape of the ends. The default is
+`'butt'`, as in Pixi.
+Angles are in radians with y pointing down, so `-Math.PI / 2` is 12 o'clock and positive sweeps
+turn clockwise. Each arc starts its own subpath. Unlike `Graphics.arc`, it does not connect to the
+previous point.
+
+```ts
+g.arcSweep(100, 100, 60, -Math.PI / 2, Math.PI * 2 * progress)
+    .stroke({ width: 14, cap: 'round', color: 0x30d158 });
+```
+
+A sweep of `2π` or more draws a full ring. The primitive is one exact distance field, so a ring is
+as cheap as a circle.
+
+## Gradients on arcs
+
+A `conic()` gradient on an arc spans that arc. Its start and sweep default to the arc's own. So the
+ramp always runs from the start cap to the end cap, however long the arc is.
+
+```ts
+const RING = conic([0xfa114f, 0xff5e8a]);
+
+g.arcSweep(100, 100, 60, -Math.PI / 2, sweep).stroke({ width: 16, cap: 'round', gradient: RING });
+```
+
+## Sectors and donut segments
+
+```ts
+g.sector(cx, cy, radius, startAngle, endAngle, innerRadius = 0, cornerRadius = 0);
+```
+
+`innerRadius` turns a pie slice into a donut segment. `cornerRadius` rounds all of its corners.
+Sectors are closed shapes, so you can fill them, stroke them, or both. Gauges, pie charts and radial
+menus are a loop of sectors.
+
+```ts
+const slices = [0.4, 0.25, 0.2, 0.15];
+const COLORS = [0x0a84ff, 0x30d158, 0xffd60a, 0xff375f];
+let a = -Math.PI / 2;
+
+for (const [i, share] of slices.entries()) {
+    const sweep = share * Math.PI * 2;
+
+    g.sector(120, 120, 90, a + 0.02, a + sweep - 0.02, 50, 6).fill(COLORS[i]);
+    a += sweep;
+}
+```
+
+---
+
+# Lines & paths
+
+URL: https://pixi-silk.schmooky.dev/docs/lines-and-paths/
+Section: Drawing
+
+> Anti-aliased lines and polylines with monotone or Catmull-Rom smoothing, Bezier paths, tapered strokes and translucent joints without double blending.
+
+Live demo `polyline` (source):
+
+```ts
+import { SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+export default defineDemo({
+    size: [480, 220],
+    controls: {
+        width: { type: 'range', label: 'width', min: 0.25, max: 16, step: 0.25, value: 6, unit: 'px' },
+        smooth: { type: 'select', label: 'smooth', options: ['none', 'monotone', 'catmull'], value: 'none' },
+        alpha: { type: 'range', label: 'alpha', min: 0.1, max: 1, step: 0.05, value: 0.6 },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+
+        stage.addChild(g);
+        tick((t) => {
+            const pts: number[] = [];
+
+            for (let i = 0; i <= 12; i++) pts.push(30 + i * 35, 110 + Math.sin(i * 1.3 + t) * 60 * Math.cos(i * 0.7));
+            g.clear();
+            // translucent on purpose: every pixel is shaded once, so joints never double-blend
+            g.polyline(pts, { smooth: params.smooth === 'none' ? undefined : (params.smooth as 'monotone') }).stroke({
+                width: params.width,
+                color: 0x0a84ff,
+                alpha: params.alpha,
+                cap: 'round',
+            });
+            for (let i = 0; i < pts.length; i += 2) g.circle(pts[i], pts[i + 1], 3).fill(0xffffff);
+        });
+    },
+});
+```
+
+## Lines and polylines
+
+```ts nocheck
+g.line(x0, y0, x1, y1).stroke({ width: 2, color: 0xffffff });
+g.polyline([x0, y0, x1, y1, x2, y2]).stroke({ width: 3, color: 0x0a84ff, cap: 'round' });
+g.polyline(points, { closed: true }).stroke(...);            // closed loop
+g.polyline(points, { smooth: 'monotone' }).stroke(...);      // charts: never overshoots the data
+g.polyline(points, { smooth: 'catmull' }).stroke(...);       // free curves through every point
+```
+
+Points can be a flat array `[x0, y0, x1, y1, ...]`, a typed array, or an array of `{ x, y }`.
+
+Each segment is its own instance. For every pixel, only the nearest segment shades it. So a
+translucent polyline has uniform alpha at its joints instead of darker blobs. For the same reason,
+joints are always round. Round is the only join that is continuous in distance.
+
+## Paths
+
+The canvas-style path API works for strokes:
+
+```ts
+g.moveTo(10, 80)
+    .quadraticCurveTo(60, 10, 110, 80)
+    .bezierCurveTo(140, 120, 180, 20, 220, 60)
+    .lineTo(260, 60)
+    .stroke({ width: 3, color: 0xff9f0a, cap: 'round' });
+```
+
+Silk flattens curves adaptively into segments. Free-form paths are stroke-only. For filled
+regions, use closed primitives or [`area()`](https://pixi-silk.schmooky.dev/docs/charts/).
+
+## Tapered strokes
+
+Pass an array as `width`. With `[start, end]`, Silk interpolates the width along the path length.
+With one value per point, each value sets the width at its vertex. Each segment becomes an uneven
+capsule, so the taper is smooth through joints.
+
+Live demo `taper` (source):
+
+```ts
+import { along, SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+const INK = along([0xff9f0a, 0xff375f, 0xbf5af2]);
+
+export default defineDemo({
+    size: [480, 220],
+    controls: {
+        start: { type: 'range', label: 'start width', min: 0, max: 30, step: 0.5, value: 2 },
+        end: { type: 'range', label: 'end width', min: 0, max: 30, step: 0.5, value: 22 },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+
+        stage.addChild(g);
+        tick((t) => {
+            const pts: number[] = [];
+
+            for (let i = 0; i <= 40; i++) {
+                const u = i / 40;
+
+                pts.push(40 + u * 400, 110 + Math.sin(u * 7 + t) * 50 * (1 - u * 0.5));
+            }
+            g.clear();
+            // `width: [start, end]` tapers along the path; an array per point also works
+            g.polyline(pts).stroke({ width: [params.start, params.end], cap: 'round', gradient: INK });
+        });
+    },
+});
+```
+
+```ts
+g.polyline(points).stroke({ width: [2, 22], cap: 'round', gradient: along([0xff9f0a, 0xbf5af2]) });
+```
+
+`along()` is a gradient that follows the stroke from its first point to its last.
+
+## Hairlines
+
+Strokes thinner than one device pixel stay one pixel wide and fade in proportion. They do not break
+up into dots. See [Fills & strokes](https://pixi-silk.schmooky.dev/docs/fills-and-strokes/#hairlines).
+
+---
+
+# Fills & strokes
+
+URL: https://pixi-silk.schmooky.dev/docs/fills-and-strokes/
+Section: Drawing
+
+> Paint styles, stroke alignment (inside, center or outside), fill and stroke without a seam, and hairlines that fade instead of breaking up.
+
+## Paint styles
+
+`fill()` and `stroke()` accept a colour, a gradient or a style object:
+
+```ts
+g.circle(0, 0, 20).fill(0xff375f);                                   // any Pixi ColorSource
+g.circle(0, 0, 20).fill('rgba(255, 55, 95, 0.5)');
+g.circle(0, 0, 20).fill(linear([0x0a84ff, 0xbf5af2]));               // a gradient
+g.circle(0, 0, 20).fill({ color: 0xff375f, alpha: 0.5, blur: 6 });   // FillStyle
+g.circle(0, 0, 20).stroke({ width: 4, color: 0xffffff, cap: 'round', alignment: 'inside' });
+```
+
+| `FillStyle` | |
+|---|---|
+| `color` | any Pixi `ColorSource` (with a gradient, it tints the ramp) |
+| `alpha` | multiplies the colour's alpha |
+| `gradient` | a `linear`, `radial`, `conic` or `along` gradient |
+| `blur` | gaussian standard deviation in local units ([Blur](https://pixi-silk.schmooky.dev/docs/blur-and-shadows/)) |
+
+`StrokeStyle` adds `width` (a number, or an array for [tapering](https://pixi-silk.schmooky.dev/docs/lines-and-paths/#tapered-strokes)),
+`alignment`, `cap`, `dash`, `dashOffset` and `dashFit`.
+
+## Alignment
+
+Live demo `alignment` (source):
+
+```ts
+import { Text } from 'pixi.js';
+import { SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+const MODES = ['inside', 'center', 'outside'] as const;
+
+export default defineDemo({
+    size: [480, 200],
+    controls: {
+        width: { type: 'range', label: 'stroke width', min: 1, max: 24, step: 1, value: 12, unit: 'px' },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+
+        stage.addChild(g);
+        MODES.forEach((mode, i) => {
+            const label = new Text({ text: mode, style: { fill: 0x8e8e93, fontSize: 13, fontFamily: 'system-ui' } });
+
+            label.anchor.set(0.5, 0);
+            label.position.set(90 + i * 150, 168);
+            stage.addChild(label);
+        });
+        tick(() => {
+            g.clear();
+            MODES.forEach((alignment, i) => {
+                const x = 40 + i * 150;
+
+                // fill + stroke on the same shape share one instance and never leave a seam
+                g.roundRect(x, 40, 100, 100, 22, 0.6)
+                    .fill(0x2c2c2e)
+                    .stroke({ width: params.width, color: 0x30d158, alpha: 0.85, alignment });
+                g.roundRect(x, 40, 100, 100, 22, 0.6).stroke({ width: 1, color: 0xffffff, alpha: 0.6 }); // the geometric edge
+            });
+        });
+    },
+});
+```
+
+Strokes on closed shapes can sit inside the edge, centred on it, or outside. `alignment` takes the
+words or Pixi's numbers (`1` inside, `0.5` center, `0` outside). Strokes on open shapes (lines,
+arcs) are always centred.
+
+## Fill + stroke in one primitive
+
+When `stroke()` directly follows `fill()`, both paints go into the same primitive. The fragment
+shader splits each pixel's coverage exactly into three parts: the stroke band, the fill outside it,
+and the fill under it. This avoids the halo you get when you draw an inner stroke on top of an
+anti-aliased fill edge.
+
+## Hairlines
+
+Live demo `hairlines` (source):
+
+```ts
+import { SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+// Lines thinner than a device pixel keep one pixel of width and fade instead of breaking up.
+export default defineDemo({
+    size: [480, 220],
+    controls: {
+        scale: { type: 'range', label: 'width scale', min: 0.05, max: 2, step: 0.01, value: 0.5 },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+
+        stage.addChild(g);
+        tick((t) => {
+            g.clear();
+            for (let i = 0; i < 24; i++) {
+                const a = -Math.PI / 2 + (i / 23) * Math.PI + Math.sin(t * 0.3) * 0.05;
+                const w = (0.1 + i * 0.12) * params.scale;
+
+                g.line(240, 200, 240 + Math.cos(a) * 220, 200 + Math.sin(a) * 190).stroke({
+                    width: w,
+                    color: 0xffffff,
+                });
+            }
+        });
+    },
+});
+```
+
+A stroke cannot be drawn thinner than one device pixel. So Silk keeps a thinner stroke one pixel
+wide and scales its alpha by `width / 1px`. The total ink stays proportional to the width. Lines
+never break into dots, and zooming out keeps every line visible. The threshold is the `minStrokePx`
+setting (default 1).
+
+## Per-object settings
+
+```ts
+const g = new SilkGraphics({ dither: 1, aaWidth: 1, minStrokePx: 1 });
+
+g.aaWidth = 1.5;     // softer edges (device pixels of AA ramp)
+g.dither = 0;        // turn gradient / blur dithering off
+```
+
+Defaults live in `SilkGraphics.defaults`.
+
+---
+
+# Dashes & dots
+
+URL: https://pixi-silk.schmooky.dev/docs/dashes/
+Section: Drawing
+
+> Dash patterns computed in the shader, with caps on every dash, dots from zero-length dashes, closed outlines without a seam, and marching ants.
+
+Live demo `dashes` (source):
+
+```ts
+import { SilkGraphics, type StrokeStyle } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+export default defineDemo({
+    size: [480, 220],
+    controls: {
+        dash: { type: 'range', label: 'dash', min: 0, max: 30, step: 1, value: 10 },
+        gap: { type: 'range', label: 'gap', min: 2, max: 30, step: 1, value: 8 },
+        cap: { type: 'select', label: 'cap', options: ['butt', 'round', 'square'], value: 'round' },
+        march: { type: 'toggle', label: 'animate', value: true },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+
+        stage.addChild(g);
+        tick((t) => {
+            const style: StrokeStyle = {
+                width: 6,
+                cap: params.cap as StrokeStyle['cap'],
+                dash: [params.dash, params.gap],
+                dashOffset: params.march ? t * 24 : 0,
+            };
+
+            g.clear();
+            g.circle(90, 110, 70).stroke({ ...style, color: 0x64d2ff }); // on closed outlines the pattern tiles without a seam
+            g.line(200, 40, 440, 40).stroke({ ...style, color: 0xffd60a });
+            g.polyline([200, 180, 260, 90, 320, 160, 380, 80, 440, 150], { smooth: 'catmull' }).stroke({
+                ...style,
+                color: 0xff375f,
+            });
+            g.line(200, 110, 440, 110).stroke({ width: 8, cap: 'round', dash: [0, 16], color: 0x30d158 }); // 0-length dashes = dots
+        });
+    },
+});
+```
+
+You can dash any stroke. The fragment shader computes the pattern along the path length. This costs
+nothing extra on the CPU, and every dash gets its own caps.
+
+```ts
+g.circle(90, 90, 60).stroke({ width: 4, color: 0x64d2ff, dash: [10, 6] });        // [dash, gap]
+g.line(0, 0, 300, 0).stroke({ width: 4, color: 0xffd60a, dash: 8 });               // equal dash and gap
+g.line(0, 20, 300, 20).stroke({ width: 8, cap: 'round', dash: [0, 16], color: 0x30d158 }); // dots
+```
+
+## Dots
+
+A dash of length `0` draws a dot with `cap: 'round'` and a square with `cap: 'square'`.
+The pattern repeats every `dash + gap` units, so `dash: [0, 16]` places a dot every 16 units.
+
+## Marching ants and spinners
+
+Animate `dashOffset` to move the pattern along the path:
+
+```ts
+app.ticker.add(() => {
+    g.clear().circle(80, 80, 56).stroke({ width: 3, color: 0xffffff, dash: [6, 6], dashOffset: t * 30 });
+});
+```
+
+## Closed outlines
+
+On closed shapes (circles, ellipses, closed polylines), Silk stretches the pattern slightly so it
+tiles the perimeter exactly. This avoids a short dash where the path starts. Set `dashFit: false`
+to keep the exact lengths.
+
+> **NOTE**
+> Dashes work on lines, polylines, paths, arcs, circles and ellipse outlines. You cannot dash
+> rounded-rect outlines yet. For a dashed card border, use a closed polyline through the corners.
+
+---
+
+# Gradients
+
+URL: https://pixi-silk.schmooky.dev/docs/gradients/
+Section: Paint
+
+> Linear, radial, conic and along-the-path gradients in OKLab, with smooth easing. Half-float ramps and dithering keep dark gradients free of banding.
+
+Live demo `gradients` (source):
+
+```ts
+import { Text } from 'pixi.js';
+import { conic, linear, radial, SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+export default defineDemo({
+    size: [480, 240],
+    controls: {
+        space: { type: 'select', label: 'space', options: ['oklab', 'linear', 'srgb'], value: 'oklab' },
+        easing: { type: 'select', label: 'easing', options: ['linear', 'smooth'], value: 'linear' },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+        const label = new Text({ text: '', style: { fill: 0x8e8e93, fontSize: 12, fontFamily: 'system-ui' } });
+
+        label.position.set(20, 214);
+        stage.addChild(g, label);
+        tick(() => {
+            const options = { space: params.space as 'oklab', easing: params.easing as 'linear' };
+
+            g.clear();
+            // gradient objects are cheap: ramps with the same stops share one atlas row
+            g.roundRect(20, 20, 440, 50, 14).fill(linear([0x0a84ff, 0xffd60a], options));
+            g.roundRect(20, 84, 440, 50, 14).fill(linear([0xff375f, 0x30d158, 0x5e5ce6], options));
+            g.circle(80, 180, 26).fill(radial([0xffffff, 0xff9f0a, [1, 0xff375f, 0]], options));
+            g.circle(160, 180, 26).fill(conic([0xff375f, 0xffd60a, 0x30d158, 0x64d2ff, 0xbf5af2, 0xff375f], options));
+            g.arcSweep(240, 180, 22, 0, Math.PI * 1.6).stroke({
+                width: 10,
+                cap: 'round',
+                gradient: conic([0x30d158, 0xff453a], options),
+            });
+            label.text = `interpolated in ${params.space}, ${params.easing} easing`;
+        });
+    },
+});
+```
+
+## Kinds
+
+```ts
+import { linear, vertical, horizontal, radial, conic, along } from 'pixi-silk';
+
+linear(stops, { from: [0, 0], to: [1, 1] });       // diagonal across the shape's box
+vertical(stops);                                    // top to bottom of the shape
+horizontal(stops);                                  // left to right
+radial(stops, { center: [0.3, 0.3], radius: 0.8, innerRadius: 0.2 });
+conic(stops, { startAngle, sweep });                // around a centre (on an arc, it spans the arc)
+along(stops);                                       // along a stroke, first point to last
+```
+
+Use a gradient anywhere a colour goes: `fill(gradient)`, `stroke({ gradient })`, or
+`fill({ gradient, color })`, where `color` tints the ramp.
+
+## Stops
+
+```ts
+linear([0xff375f, 0x0a84ff]);                           // spread evenly
+linear([[0, 0xff375f], [0.3, 0xffd60a], [1, 0x0a84ff]]);
+linear([[0, 0xffffff, 1], [1, 0xffffff, 0]]);            // [offset, color, alpha]
+linear([{ offset: 0.5, color: '#30d158', alpha: 0.5 }]);
+linear([[0, RED], [0.5, RED], [0.5, BLUE], [1, BLUE]]);  // hard stop
+```
+
+Silk clamps offsets to 0..1 and makes them non-decreasing, like CSS.
+
+## Colour space
+
+By default, stops interpolate in **OKLab**, a perceptual space. A red-to-green ramp passes through
+a bright yellow, not a muddy brown. Lightness also changes evenly. Pass `space: 'linear'` for
+physically linear light (glows, light falloff) or `space: 'srgb'` for CSS-like results.
+Interpolation is premultiplied, so fading a colour to transparent never darkens it.
+
+## Easing
+
+`easing: 'smooth'` runs a monotone cubic spline through the stops, with flat ends. It removes the
+Mach bands at every stop of a linear ramp. It never overshoots. A function `(t) => t` remaps the
+ramp parameter for custom falloffs.
+
+## Units and extend
+
+- With `units: 'shape'` (default), coordinates are fractions of the shape's bounding box. One
+  gradient object then fits every shape it paints.
+- With `units: 'local'`, coordinates are in the graphics' local space. One continuous ramp then
+  spans many shapes (a chart's bars, a row of pills).
+- `extend: 'pad' | 'repeat' | 'reflect'` controls what happens outside 0..1.
+
+## No banding
+
+Dark, wide gradients stay smooth on 8-bit displays. Silk bakes each ramp once into a shared
+256-wide half-float atlas. The shader samples it per pixel with ±½ LSB dither (interleaved gradient
+noise). Try both toggles below. The reveal toggle multiplies the contrast by 8 to show the steps.
+
+Live demo `dither` (source):
+
+```ts
+import { ColorMatrixFilter, Container } from 'pixi.js';
+import { SilkGraphics, vertical } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+// A dark, wide gradient has only a few 8-bit steps. Half-float ramps + ±½ LSB dither hide them.
+const NIGHT = vertical([0x0b1026, 0x1d1a3a, 0x10141f]);
+
+export default defineDemo({
+    size: [480, 220],
+    background: 0x000000,
+    controls: {
+        dither: { type: 'toggle', label: 'dither', value: true },
+        reveal: { type: 'toggle', label: 'reveal x8', value: true },
+    },
+    setup({ stage, params, tick }) {
+        const view = new Container();
+        const g = new SilkGraphics();
+        // multiply the contrast by 8 around black so every banding step shows
+        const reveal = new ColorMatrixFilter();
+
+        reveal.brightness(8, false);
+        view.addChild(g);
+        stage.addChild(view);
+        g.rect(0, 0, 480, 220).fill(NIGHT);
+        g.circle(360, 70, 60).fill({ color: 0xffd9a0, alpha: 0.12, blur: 40 });
+        tick(() => {
+            g.dither = params.dither ? 1 : 0;
+            view.filters = params.reveal ? [reveal] : [];
+        });
+    },
+});
+```
+
+---
+
+# Blur, glows & shadows
+
+URL: https://pixi-silk.schmooky.dev/docs/blur-and-shadows/
+Section: Paint
+
+> A gaussian blur applied to each shape's distance field gives neon glows, soft drop shadows and motion blur without filters or extra passes.
+
+Live demo `glow` (source):
+
+```ts
+import { SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+// `blur` is a gaussian applied to the distance field: no filters, no extra passes.
+export default defineDemo({
+    size: [480, 220],
+    background: 0x050507,
+    controls: {
+        blur: { type: 'range', label: 'blur (σ)', min: 0, max: 30, step: 0.5, value: 12, unit: 'px' },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+
+        stage.addChild(g);
+        tick((t) => {
+            const pulse = 0.8 + Math.sin(t * 2) * 0.2;
+
+            g.clear();
+            // neon: a blurred copy under a crisp stroke
+            g.circle(110, 110, 60).stroke({ width: 8, color: 0xff375f, blur: params.blur * pulse, alpha: 0.9 });
+            g.circle(110, 110, 60).stroke({ width: 3, color: 0xffd1dc });
+            // soft shadow: offset, blurred, translucent
+            g.roundRect(260, 60 + 18, 180, 100, 24, 0.6).fill({ color: 0x000000, alpha: 0.9, blur: params.blur });
+            g.roundRect(260, 60, 180, 100, 24, 0.6).fill(0x2c2c2e);
+            g.circle(300, 110, 16).fill({ color: 0x30d158, blur: params.blur * 0.4 });
+            g.circle(300, 110, 7).fill(0xe8ffe8);
+        });
+    },
+});
+```
+
+Every paint takes a `blur` (the gaussian standard deviation σ, in local units). Silk blurs the
+**distance field**, not the pixels. Coverage becomes `0.5 - 0.5 * erf(d / (sigma * sqrt(2)))`. The
+shape's quad grows by 3σ. A blurred shape costs the same as any other primitive.
+
+## Glows
+
+Draw a blurred copy under a crisp one:
+
+```ts
+g.circle(110, 110, 60).stroke({ width: 8, color: 0xff375f, blur: 12, alpha: 0.9 }); // glow
+g.circle(110, 110, 60).stroke({ width: 3, color: 0xffd1dc });                        // core
+```
+
+## Soft shadows
+
+Offset, blur and fade a dark copy of the shape before drawing it:
+
+```ts
+g.roundRect(20, 20 + 18, 180, 100, 24, 0.6).fill({ color: 0x000000, alpha: 0.45, blur: 24 });
+g.roundRect(20, 20, 180, 100, 24, 0.6).fill(0x1c1c1e);
+```
+
+The Live Activity cards in the [Showcase](https://pixi-silk.schmooky.dev/showcase/) use this pattern. Their shadow matches the
+reference image (σ 30.5 px, 37.5 px down, 45 % black).
+
+## Motion blur and soft ends
+
+A blurred stroke makes a cheap motion trail. Blurring the first and last ticks of a scale looks like
+depth of field. See the espresso timer on the Live Activities sheet. Silk dithers blurred paints like
+gradients, so large soft shadows don't band.
+
+> **TIP**
+> Blur is exact for straight edges and nearly exact for corners. For huge blurs on complex paths, you
+> can still put a Pixi `BlurFilter` over the object. With `createSilkApp`, filters inherit the screen
+> resolution.
+
+---
+
+# Charts
+
+URL: https://pixi-silk.schmooky.dev/docs/charts/
+Section: Building UI
+
+> Anti-aliased line and area charts with monotone smoothing that never overshoots, fading gradient fills, dotted guides, bars and dots.
+
+Live demo `area-chart` (source):
+
+```ts
+import { SilkGraphics, vertical } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+const FILL = vertical(
+    [
+        [0, 0x0a84ff, 0.55],
+        [1, 0x0a84ff, 0],
+    ],
+    { easing: 'smooth' },
+);
+
+export default defineDemo({
+    size: [480, 220],
+    controls: {
+        smooth: { type: 'toggle', label: 'monotone smoothing', value: true },
+        dots: { type: 'toggle', label: 'dots', value: true },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+        const data = Array.from({ length: 13 }, (_, i) => 90 + Math.sin(i * 0.9) * 40);
+
+        stage.addChild(g);
+        tick((t) => {
+            const pts = data.flatMap((v, i) => [30 + i * 35, v + Math.sin(t * 1.5 + i) * 12]);
+            const smooth = params.smooth ? ('monotone' as const) : undefined;
+
+            g.clear();
+            for (const y of [40, 90, 140]) g.line(20, y, 460, y).stroke({ width: 1, color: 0x3a3a3c, dash: [2, 4] });
+            g.line(20, 190, 460, 190).stroke({ width: 1, color: 0x636366 });
+            // area between the series and a baseline; stroke() right after draws its top line
+            g.area(pts, 190, { smooth }).fill(FILL).stroke({ width: 2.5, color: 0x0a84ff, cap: 'round' });
+            if (params.dots)
+                for (let i = 0; i < pts.length; i += 2)
+                    g.circle(pts[i], pts[i + 1], 3.5)
+                        .fill(0xffffff)
+                        .stroke({ width: 2, color: 0x0a84ff });
+        });
+    },
+});
+```
+
+## Areas
+
+```ts
+g.area(points, baseline, { smooth: 'monotone' });          // between a series and a y baseline
+g.area(upperPoints, lowerPoints);                           // band between two series
+```
+
+`area()` fills the region under a series (or between two) with vertical columns. The columns tile
+exactly and share edges without seams, so translucent fills stay uniform. The top and bottom edges
+get analytic anti-aliasing.
+
+Call `stroke()` right after to draw the series line on top:
+
+```ts
+const FILL = vertical([[0, 0x0a84ff, 0.55], [1, 0x0a84ff, 0]], { easing: 'smooth' });
+
+g.area(points, 190, { smooth: 'monotone' }).fill(FILL).stroke({ width: 2.5, color: 0x0a84ff, cap: 'round' });
+```
+
+## Smoothing that respects the data
+
+`smooth: 'monotone'` never overshoots. It uses Steffen's method, like d3's `curveMonotoneX`. Peaks
+stay on the data points, and flat runs stay flat. Use `'catmull'` only for decorative curves. Silk
+exports the `monotoneX()` helper if you need the resampled points.
+
+## Guides, bars and dots
+
+```ts
+for (const y of [40, 90, 140]) g.line(20, y, 460, y).stroke({ width: 1, color: 0x3a3a3c, dash: [2, 4] });
+for (const [i, v] of values.entries()) g.roundRect(20 + i * 12, 190 - v, 8, v, 3).fill(0xffd60a);
+for (const [x, y] of points) g.circle(x, y, 3.5).fill(0xffffff).stroke({ width: 2, color: 0x0a84ff });
+```
+
+## One gradient across many shapes
+
+With `units: 'local'`, a gradient uses the graphics' coordinates instead of each shape's box. A row
+of bars then samples one continuous ramp:
+
+```ts
+const HEAT = linear([[0, 0x30d158], [0.5, 0xffd60a], [1, 0xff453a]], { units: 'local', from: [0, 190], to: [0, 40] });
+
+for (const [i, v] of values.entries()) g.roundRect(x(i), 190 - v, 8, v, 3).fill(HEAT);
+```
+
+The [Lab](https://pixi-silk.schmooky.dev/lab/) has complete chart widgets built from these pieces: area charts, bar charts,
+sparklines, heart-rate pills, ranges and gauges.
+
+---
+
+# Transforms
+
+URL: https://pixi-silk.schmooky.dev/docs/transforms/
+Section: Building UI
+
+> Save, restore, translate, rotate and scale the drawing. Rotated and scaled primitives stay exact, and stroke widths scale with them.
+
+Live demo `transforms` (source):
+
+```ts
+import { SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+// save / translateTransform / rotateTransform / scaleTransform / restore, like Pixi's GraphicsContext.
+export default defineDemo({
+    size: [420, 220],
+    controls: {
+        speed: { type: 'range', label: 'speed', min: 0, max: 3, step: 0.05, value: 1 },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+        let a = 0;
+
+        stage.addChild(g);
+        tick((_t, dt) => {
+            a += dt * params.speed;
+            g.clear();
+            g.save().translateTransform(210, 110);
+            for (let i = 0; i < 12; i++) {
+                g.save()
+                    .rotateTransform((i / 12) * Math.PI * 2 + a)
+                    .translateTransform(70, 0)
+                    .scaleTransform(0.6 + 0.4 * Math.sin(a * 2 + i));
+                // rotated rects stay exact: rotation is part of the primitive, not a tessellation
+                g.roundRect(-14, -8, 28, 16, 8).fill(i % 2 ? 0xff9f0a : 0x5e5ce6);
+                g.restore();
+            }
+            g.star(0, 0, 6, 34, 16, -a, 4).fill(0xffd60a);
+            g.restore();
+        });
+    },
+});
+```
+
+`SilkGraphics` has the same transform stack as Pixi's `GraphicsContext`:
+
+```ts
+g.save()
+    .translateTransform(210, 110)
+    .rotateTransform(Math.PI / 4)
+    .scaleTransform(1.5);
+g.roundRect(-20, -10, 40, 20, 8).fill(0xff9f0a);   // drawn in the transformed space
+g.restore();
+```
+
+| method | |
+|---|---|
+| `save()` / `restore()` | push / pop the current transform |
+| `translateTransform(x, y = x)` | move |
+| `rotateTransform(angle)` | rotate (radians) |
+| `scaleTransform(x, y = x)` | scale |
+| `setTransform(a, b, c, d, tx, ty)` | replace with a matrix |
+| `resetTransform()` | back to identity |
+
+Silk stores shapes already transformed. Rects, ellipses, hearts and polygons carry their rotation
+into the shader. A rotated rounded rect is still an exact distance field, not a tessellation.
+Stroke widths, dash lengths and blur radii scale with the transform's uniform scale.
+
+## When to use a Container instead
+
+Transforms bake into the primitives, which suits icons and repeated parts drawn every frame. For
+objects that move as a whole (a card sliding in), put them in their own `SilkGraphics` or
+`Container`. Then animate `position`, `rotation` or `scale`, which changes one matrix instead of
+rebuilding primitives.
+
+---
+
+# Hit testing & events
+
+URL: https://pixi-silk.schmooky.dev/docs/hit-testing/
+Section: Building UI
+
+> Pointer events test each shape's real distance field: rings are hollow, lines react only within their stroke and rounded corners stay rounded.
+
+Live demo `hit-test` (source):
+
+```ts
+import { SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+// containsPoint() evaluates the real distance field: the ring is hollow, the line is only its stroke.
+export default defineDemo({
+    size: [480, 220],
+    setup({ stage, tick }) {
+        const items = [
+            { draw: (g: SilkGraphics, c: number) => g.circle(100, 110, 60).stroke({ width: 18, color: c }) },
+            { draw: (g: SilkGraphics, c: number) => g.roundRect(200, 50, 120, 120, 36, 0.6).fill(c) },
+            {
+                draw: (g: SilkGraphics, c: number) =>
+                    g.polyline([350, 170, 390, 60, 450, 150]).stroke({ width: 10, cap: 'round', color: c }),
+            },
+        ].map((item) => {
+            const g = new SilkGraphics();
+
+            g.eventMode = 'static';
+            g.cursor = 'pointer';
+            stage.addChild(g);
+
+            return { ...item, g, hover: false };
+        });
+
+        for (const item of items) {
+            item.g.on('pointerover', () => (item.hover = true));
+            item.g.on('pointerout', () => (item.hover = false));
+        }
+        tick(() => {
+            for (const item of items) item.draw(item.g.clear(), item.hover ? 0x30d158 : 0x48484a);
+        });
+    },
+});
+```
+
+Set `eventMode` and add listeners, as with any Pixi display object:
+
+```ts
+const button = new SilkGraphics();
+
+button.eventMode = 'static';
+button.cursor = 'pointer';
+button.on('pointertap', () => console.log('tap'));
+button.roundRect(0, 0, 160, 48, 24).fill(0x0a84ff);
+```
+
+`containsPoint()` first checks the object's bounds. Then it runs the shader's distance functions on
+the CPU for the primitives under the pointer, last drawn first. A point is inside when its distance
+to the painted region is negative:
+
+- A stroked circle is a ring, so its centre is not inside.
+- A line or polyline counts only within its stroke width.
+- A rounded rect excludes the corners outside its radius.
+- A blurred paint counts only up to its geometric edge.
+
+You can also call it yourself:
+
+```ts
+if (g.containsPoint(g.toLocal(pointerGlobal))) { /* hovered */ }
+```
+
+In large interactive scenes, split independent targets into separate `SilkGraphics` objects. Then
+each one hit-tests only its own primitives.
+
+---
+
+# Animation
+
+URL: https://pixi-silk.schmooky.dev/docs/animation/
+Section: Building UI
+
+> Redraw SilkGraphics cheaply every frame. Animate with damp, dampAngle, Spring and ease so motion feels the same at 60, 120 or 144 Hz.
+
+Live demo `spring` (source):
+
+```ts
+import { Container } from 'pixi.js';
+import { damp, SilkGraphics, Spring } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+// Frame-rate independent motion: the knob glides the same at 60, 120 or 144 Hz.
+export default defineDemo({
+    size: [480, 200],
+    touchAction: 'none',
+    controls: {
+        stiffness: { type: 'range', label: 'stiffness', min: 40, max: 400, step: 1, value: 170 },
+        damping: { type: 'range', label: 'damping', min: 4, max: 40, step: 1, value: 14 },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+        const hit = new Container();
+        const x = new Spring(120);
+        let glow = 0;
+        let dragging = false;
+
+        hit.eventMode = 'static';
+        hit.hitArea = { contains: (px: number, py: number) => px >= 0 && px <= 480 && py >= 0 && py <= 200 };
+        hit.on('pointerdown', (e) => {
+            dragging = true;
+            x.target = Math.min(440, Math.max(40, e.getLocalPosition(stage).x));
+        });
+        hit.on('globalpointermove', (e) => {
+            if (dragging) x.target = Math.min(440, Math.max(40, e.getLocalPosition(stage).x));
+        });
+        hit.on('pointerup', () => (dragging = false));
+        hit.on('pointerupoutside', () => (dragging = false));
+        stage.addChild(g, hit);
+        tick((_t, dt) => {
+            x.stiffness = params.stiffness;
+            x.damping = params.damping;
+            x.step(dt);
+            glow = damp(glow, dragging ? 1 : 0, 10, dt);
+            g.clear();
+            g.pill(40, 94, 400, 12).fill(0x2c2c2e);
+            g.pill(40, 94, Math.max(12, x.value - 40), 12).fill(0x0a84ff);
+            g.circle(x.value, 100, 22 + glow * 6).fill({ color: 0x0a84ff, alpha: 0.35 * glow, blur: 10 });
+            g.circle(x.value, 100, 20).fill(0xffffff);
+        });
+    },
+});
+```
+
+## Immediate mode is cheap
+
+The simplest way to animate is to clear and redraw every frame. `clear()` keeps the GPU buffers.
+Each primitive is 40 floats, and one instanced draw call renders them all:
+
+```ts
+app.ticker.add((ticker) => {
+    const t = ticker.lastTime / 1000;
+
+    g.clear();
+    g.arcSweep(80, 80, 44, -Math.PI / 2, Math.PI * 2 * (0.5 + 0.4 * Math.sin(t))).stroke({ width: 12, cap: 'round', color: 0x30d158 });
+});
+```
+
+Put static parts in a second `SilkGraphics` and draw it once.
+
+## Frame-rate independent motion
+
+Easing by a fixed fraction per frame (`x += (target - x) * 0.1`) runs twice as fast on a 120 Hz
+display. The helpers take the frame time instead:
+
+```ts
+import { damp, dampAngle, Spring, ease } from 'pixi-silk';
+
+x = damp(x, target, 10, dt);              // exponential approach, lambda is about 1 / seconds
+angle = dampAngle(angle, target, 8, dt);  // shortest way around the circle
+
+const spring = new Spring(0, 170, 26);    // value, stiffness, damping
+spring.target = 1;
+app.ticker.add((t) => draw(spring.step(t.deltaMS / 1000)));
+
+ease.outCubic(0.5); // inOutCubic, outCubic, inOutSine, outExpo
+```
+
+`Spring.step()` integrates with fixed sub-steps, so it stays stable with large frame times.
+`spring.settled` tells you when to stop redrawing.
+
+## Sub-pixel motion
+
+Slow-moving shapes glide instead of snapping from pixel to pixel. Silk renders coordinates exactly
+as given, and `createSilkApp` turns off pixel rounding. The [sub-pixel lab page](https://pixi-silk.schmooky.dev/lab/04-subpixel/)
+compares Silk with tessellated graphics.
+
+---
+
+# Resolution & DPR
+
+URL: https://pixi-silk.schmooky.dev/docs/resolution/
+Section: Rendering
+
+> createSilkApp maps the canvas 1:1 to device pixels, even at fractional DPRs, follows DPR changes and renders filters at screen resolution.
+
+Live demo `resolution` (source):
+
+```ts
+import { SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+// A Siemens star is the hardest test for anti-aliasing: every wedge narrows below a pixel.
+export default defineDemo({
+    size: [480, 240],
+    controls: {
+        resolution: { type: 'select', label: 'resolution', options: ['device', '1x', '2x', '3x'], value: 'device' },
+    },
+    setup({ silk, stage, params, tick }) {
+        const g = new SilkGraphics();
+        let applied = '';
+
+        stage.addChild(g);
+        for (let i = 0; i < 36; i++) {
+            const a = (i / 36) * Math.PI * 2;
+
+            g.sector(240, 120, 110, a, a + Math.PI / 36).fill(0xffffff);
+        }
+        g.circle(240, 120, 110).stroke({ width: 1, color: 0x636366 });
+        tick(() => {
+            if (params.resolution === applied) return;
+            applied = params.resolution;
+            // createSilkApp sizes the backing store in device pixels; force 1x/2x/3x to compare
+            silk.setResolution(applied === 'device' ? null : Number(applied[0]));
+        });
+    },
+});
+```
+
+Smooth edges need two things: exact coverage (Silk's shader) and a canvas whose pixels are the
+screen's pixels. `createSilkApp` handles the canvas:
+
+```ts
+import { createSilkApp } from 'pixi-silk';
+
+const silk = await createSilkApp({
+    parent: document.getElementById('stage')!,
+    background: 0x000000,
+    maxResolution: 3,          // cap the DPR (memory / fill rate)
+    // fixedResolution: 2,     // force a resolution instead
+    // touchAction: 'none',    // canvases that handle drags themselves
+});
+
+silk.app;              // the Pixi Application
+silk.width;            // CSS pixels
+silk.resolution;       // device pixels per CSS pixel
+silk.setResolution(1); // compare at 1x (null returns to devicePixelRatio)
+silk.destroy();
+```
+
+## What it sets up
+
+- It sizes the **backing store** with `ResizeObserver` and `device-pixel-content-box`. Every canvas
+  pixel maps to exactly one screen pixel, even at a DPR of 1.5 or 2.625. Rounding `cssWidth * dpr`
+  yourself can be off by one. If it is, the browser resamples the whole canvas and blurs every edge.
+- **DPR changes** (dragging the window to another display, browser zoom) resize the backing store.
+  A `matchMedia` listener handles Safari, which has no device-pixel-content-box.
+- **MSAA** is off (`antialias: false`). Silk's coverage is analytic, so MSAA would only cost
+  bandwidth.
+- **Pixel rounding** is off (`roundPixels: false`), so sub-pixel motion stays smooth.
+- **Filters** render at screen resolution. Pixi filters default to resolution 1, which blurs
+  everything behind a filter on retina screens. `createSilkApp` sets
+  `Filter.defaultOptions.resolution` to `'inherit'` (opt out with `inheritFilterResolution: false`).
+- **Touch scrolling** works. Pixi sets `touch-action: none` on its canvas, which blocks page
+  scrolling on phones. The default here is `pan-y pinch-zoom`.
+
+## Using your own Application
+
+If you create the application yourself, use the same settings:
+
+```ts
+await app.init({
+    preference: 'webgl',
+    antialias: false,
+    autoDensity: true,
+    resolution: window.devicePixelRatio,
+    roundPixels: false,
+});
+Filter.defaultOptions.resolution = 'inherit';
+```
+
+## Render textures and filters
+
+A `SilkGraphics` in a render texture or behind a filter is anti-aliased at that target's
+resolution, because Silk's coverage uses screen-space derivatives. Give render textures the
+renderer's resolution to keep them sharp on retina screens. The
+[render texture lab page](https://pixi-silk.schmooky.dev/lab/06-render-texture/) shows the difference.
+
+---
+
+# Performance
+
+URL: https://pixi-silk.schmooky.dev/docs/performance/
+Section: Rendering
+
+> One instanced draw call per SilkGraphics and about 12 ms of CPU to rebuild 50,000 primitives, plus tips for static layers, gradients and fill rate.
+
+Live demo `stress` (source):
+
+```ts
+import { Text } from 'pixi.js';
+import { SilkGraphics } from 'pixi-silk';
+import { defineDemo } from './runtime';
+
+// Everything is rebuilt every frame: one SilkGraphics, one draw call, however many primitives.
+export default defineDemo({
+    size: [480, 260],
+    controls: {
+        count: { type: 'range', label: 'primitives', min: 500, max: 30000, step: 500, value: 5000 },
+    },
+    setup({ stage, params, tick }) {
+        const g = new SilkGraphics();
+        const stats = new Text({
+            text: '',
+            style: { fill: 0xffffff, fontSize: 12, fontFamily: 'ui-monospace, monospace' },
+        });
+
+        stats.position.set(12, 10);
+        stage.addChild(g, stats);
+        let cpu = 0;
+
+        tick((t) => {
+            const start = performance.now();
+
+            g.clear();
+            for (let i = 0; i < params.count; i++) {
+                const a = i * 2.399963 + t * 0.2;
+                const r = Math.sqrt(i / params.count) * 120;
+                const x = 240 + Math.cos(a) * r * 1.8;
+                const y = 130 + Math.sin(a) * r;
+
+                if (i % 3 === 0) g.circle(x, y, 2.2).fill(0xff375f);
+                else if (i % 3 === 1) g.roundRect(x - 2, y - 2, 4, 4, 1).fill(0x0a84ff);
+                else g.line(x, y, x + 5, y + 2).stroke({ width: 1, color: 0x30d158 });
+            }
+            cpu = cpu * 0.9 + (performance.now() - start) * 0.1;
+            stats.text = `${params.count} primitives, 1 draw call, rebuilt in ${cpu.toFixed(1)} ms`;
+        });
+    },
+});
+```
+
+## The cost model
+
+- Each `SilkGraphics` is one **draw call**, whatever it contains.
+- The **CPU** writes 40 floats per primitive into a reusable buffer. Rebuilding 50,000 primitives
+  every frame takes about 12 ms on a laptop. Typical UIs (hundreds of primitives) cost well under
+  0.5 ms.
+- The **GPU** shades each primitive as one quad sized to its bounds plus a one-pixel margin, once
+  per covered pixel. Cost scales with covered area, like any 2D renderer. Large blurs grow the quad
+  by 3σ.
+- Buffers grow to the largest frame and stay in **memory**. Gradients share rows in one 256x256
+  half-float atlas.
+
+## Tips
+
+- Split static and dynamic parts. Draw backgrounds and label shapes once, in one object. Redraw only
+  the animated parts every frame.
+- Move objects instead of rebuilding them. Animating `position`, `rotation`, `scale` or `alpha` of a
+  `SilkGraphics` changes one matrix.
+- Reuse gradients. Create them at module scope. Identical ramps share an atlas row anyway, but
+  reusing the object avoids re-parsing stops.
+- Group primitives that share a layer into one `SilkGraphics` to save draw calls.
+- Cap the resolution on large canvases: `createSilkApp({ maxResolution: 2 })`.
+- Stop redrawing when idle. Check `Spring.settled`, or redraw only on data changes.
+
+---
+
+# How it works
+
+URL: https://pixi-silk.schmooky.dev/docs/how-it-works/
+Section: Rendering
+
+> One instanced quad per primitive, exact signed distance functions per pixel, analytic coverage from screen-space derivatives and dithered OKLab ramps.
+
+## One instance per primitive
+
+`SilkGraphics` is a Pixi `Mesh` with an instanced unit quad. Each primitive you draw is one
+instance of 40 floats: its bounds, shape parameters, paints, gradient geometry and dash pattern.
+The vertex shader expands the quad to the primitive's bounds plus an anti-aliasing margin. The
+margin is measured in device pixels, using the smallest singular value of the local-to-pixel
+Jacobian. That keeps it right at any zoom and for rotated or skewed objects.
+
+## Exact distance, analytic coverage
+
+For every pixel, the fragment shader computes the signed distance `d` from the pixel centre to the
+shape (negative inside). It supports rounded boxes with per-corner radii and superellipse corners,
+ellipses (trig-free Newton iterations), arcs, sectors, capsules, hearts, stars and triangles. It
+turns the distance into coverage with a one-pixel box filter:
+
+```glsl
+float px = sqrt(abs(dFdx(p).x * dFdy(p).y - dFdx(p).y * dFdy(p).x)); // one device pixel, in local units
+float coverage = clamp(0.5 - d / px, 0.0, 1.0);
+```
+
+The filter is exactly one device pixel wide, because `px` comes from screen-space derivatives. This
+holds at 1000x zoom, when rotated, and inside filters and render textures. With `blur`, the box
+filter becomes a gaussian: `0.5 - 0.5 * erf(d / (σ√2))`.
+
+## Fill and stroke without seams
+
+A primitive with both a fill and a stroke is shaded once. The shader computes the coverage of the
+whole shape and of the stroke band. It splits each pixel exactly into "stroke" and "fill outside the
+stroke", so no anti-aliased fill edge shows through an inner stroke.
+
+## Polylines
+
+Each polyline segment is an instance with its neighbours' geometry attached. A segment shades a
+fragment only if it is the nearest one, so joints are round and translucent lines never
+double-blend. A tiny antisymmetric bias breaks ties. Tapered strokes use the exact distance to an
+uneven capsule.
+
+## Areas
+
+Filled chart areas are split into vertical columns that tile exactly. Shared column edges get no
+anti-aliasing margin, only the top and bottom edges do. That keeps translucent fills uniform, with
+no seams between columns.
+
+## Hairlines
+
+A stroke thinner than a device pixel is widened to one pixel, with its alpha scaled by the ratio.
+The amount of "ink" stays the same, and thin lines never break apart.
+
+## Gradients
+
+Stops are interpolated (premultiplied, in OKLab by default) and baked into a shared 256x256 RGBA16F
+atlas, one reference-counted row per ramp. Sampling adds ±0.5 LSB of interleaved gradient noise,
+which removes 8-bit banding but leaves exact 8-bit colours untouched.
+
+## Hit testing
+
+The same distance functions run on the CPU, so `containsPoint` tests the real shape, including
+holes and stroke widths.
+
+---
+
+# API reference
+
+## ConicGradient (Class)
+
+URL: https://pixi-silk.schmooky.dev/api/classes/ConicGradient/
+
+An angular ramp around a centre. On arcs it follows the arc. Create it with [conic](https://pixi-silk.schmooky.dev/api/functions/conic/).
+
+## Extends
+
+- [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/)
+
+## Constructors
+
+### Constructor
+
+```ts
+new ConicGradient(options: ConicGradientOptions): ConicGradient;
+```
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `options` | [`ConicGradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/ConicGradientOptions/) |
+
+#### Returns
+
+`ConicGradient`
+
+#### Overrides
+
+[`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`constructor`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#constructor)
+
+## Properties
+
+| Property | Modifier | Type | Description | Inherited from | Defined in |
+| ------ | ------ | ------ | ------ | ------ | ------ |
+|  `center` | `public` | [`Vec2`](https://pixi-silk.schmooky.dev/api/types/Vec2/) | Centre of the ramp. | - | gradient.ts:347 |
+|  `easing` | `readonly` | [`Easing`](https://pixi-silk.schmooky.dev/api/types/Easing/) | How the ramp moves between stops. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`easing`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#easing) | gradient.ts:138 |
+|  `extend` | `readonly` | [`ExtendMode`](https://pixi-silk.schmooky.dev/api/types/ExtendMode/) | What the gradient does outside 0..1. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`extend`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#extend) | gradient.ts:140 |
+|  `space` | `readonly` | [`ColorSpace`](https://pixi-silk.schmooky.dev/api/types/ColorSpace/) | Interpolation space. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`space`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#space) | gradient.ts:136 |
+|  `startAngle?` | `public` | `number` | Angle where the ramp starts. Unset follows the arc, or 12 o'clock for other shapes. | - | gradient.ts:349 |
+|  `sweep?` | `public` | `number` | Angular length of the ramp. Unset follows the arc, or a full turn for other shapes. | - | gradient.ts:351 |
+|  `units` | `readonly` | [`GradientUnits`](https://pixi-silk.schmooky.dev/api/types/GradientUnits/) | Coordinates of the gradient's points and radii. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`units`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#units) | gradient.ts:142 |
+
+## Gradient (Class)
+
+URL: https://pixi-silk.schmooky.dev/api/classes/Gradient/
+
+Base class of all gradients. Stops are interpolated premultiplied (OKLab by default), baked into a
+shared half-float atlas and dithered when sampled, so gradients stay smooth without banding.
+
+## Extended by
+
+- [`ConicGradient`](https://pixi-silk.schmooky.dev/api/classes/ConicGradient/)
+- [`LinearGradient`](https://pixi-silk.schmooky.dev/api/classes/LinearGradient/)
+- [`PathGradient`](https://pixi-silk.schmooky.dev/api/classes/PathGradient/)
+- [`RadialGradient`](https://pixi-silk.schmooky.dev/api/classes/RadialGradient/)
+
+## Constructors
+
+### Constructor
+
+```ts
+new Gradient(options: GradientOptions): Gradient;
+```
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `options` | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/) |
+
+#### Returns
+
+`Gradient`
+
+## Properties
+
+| Property | Modifier | Type | Description | Defined in |
+| ------ | ------ | ------ | ------ | ------ |
+|  `easing` | `readonly` | [`Easing`](https://pixi-silk.schmooky.dev/api/types/Easing/) | How the ramp moves between stops. | gradient.ts:138 |
+|  `extend` | `readonly` | [`ExtendMode`](https://pixi-silk.schmooky.dev/api/types/ExtendMode/) | What the gradient does outside 0..1. | gradient.ts:140 |
+|  `space` | `readonly` | [`ColorSpace`](https://pixi-silk.schmooky.dev/api/types/ColorSpace/) | Interpolation space. | gradient.ts:136 |
+|  `units` | `readonly` | [`GradientUnits`](https://pixi-silk.schmooky.dev/api/types/GradientUnits/) | Coordinates of the gradient's points and radii. | gradient.ts:142 |
+
+## GradientAtlas (Class)
+
+URL: https://pixi-silk.schmooky.dev/api/classes/GradientAtlas/
+
+All gradient ramps live in one RGBA16F texture (one ramp per row), shared by every
+SilkGraphics. Half floats keep ~11 bits per channel so dark and low-alpha ramps
+don't get quantised before the shader dithers them to the 8-bit framebuffer.
+
+## Constructors
+
+### Constructor
+
+```ts
+new GradientAtlas(): GradientAtlas;
+```
+
+#### Returns
+
+`GradientAtlas`
+
+## Properties
+
+| Property | Modifier | Type | Description | Defined in |
+| ------ | ------ | ------ | ------ | ------ |
+|  `source` | `readonly` | `BufferImageSource` | The half-float texture that holds the ramps. | atlas.ts:27 |
+
+## Accessors
+
+### shared
+
+#### Get Signature
+
+```ts
+get static shared(): GradientAtlas;
+```
+
+The atlas every SilkGraphics uses.
+
+##### Returns
+
+`GradientAtlas`
+
+## Methods
+
+### acquire()
+
+```ts
+acquire(gradient: Gradient): number;
+```
+
+Returns the atlas row for a gradient ramp, baking it on first use.
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `gradient` | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/) |
+
+#### Returns
+
+`number`
+
+***
+
+### release()
+
+```ts
+release(key: string): void;
+```
+
+Drops one reference to a ramp. When the atlas is full, rows nobody uses are reused.
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `key` | `string` |
+
+#### Returns
+
+`void`
+
+## LinearGradient (Class)
+
+URL: https://pixi-silk.schmooky.dev/api/classes/LinearGradient/
+
+A straight ramp between two points. Create it with [linear](https://pixi-silk.schmooky.dev/api/functions/linear/), [vertical](https://pixi-silk.schmooky.dev/api/functions/vertical/) or [horizontal](https://pixi-silk.schmooky.dev/api/functions/horizontal/).
+
+## Extends
+
+- [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/)
+
+## Constructors
+
+### Constructor
+
+```ts
+new LinearGradient(options: LinearGradientOptions): LinearGradient;
+```
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `options` | [`LinearGradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/LinearGradientOptions/) |
+
+#### Returns
+
+`LinearGradient`
+
+#### Overrides
+
+[`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`constructor`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#constructor)
+
+## Properties
+
+| Property | Modifier | Type | Description | Inherited from | Defined in |
+| ------ | ------ | ------ | ------ | ------ | ------ |
+|  `easing` | `readonly` | [`Easing`](https://pixi-silk.schmooky.dev/api/types/Easing/) | How the ramp moves between stops. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`easing`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#easing) | gradient.ts:138 |
+|  `extend` | `readonly` | [`ExtendMode`](https://pixi-silk.schmooky.dev/api/types/ExtendMode/) | What the gradient does outside 0..1. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`extend`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#extend) | gradient.ts:140 |
+|  `from` | `public` | [`Vec2`](https://pixi-silk.schmooky.dev/api/types/Vec2/) | Start point. | - | gradient.ts:267 |
+|  `space` | `readonly` | [`ColorSpace`](https://pixi-silk.schmooky.dev/api/types/ColorSpace/) | Interpolation space. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`space`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#space) | gradient.ts:136 |
+|  `to` | `public` | [`Vec2`](https://pixi-silk.schmooky.dev/api/types/Vec2/) | End point. | - | gradient.ts:269 |
+|  `units` | `readonly` | [`GradientUnits`](https://pixi-silk.schmooky.dev/api/types/GradientUnits/) | Coordinates of the gradient's points and radii. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`units`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#units) | gradient.ts:142 |
+
+## PathGradient (Class)
+
+URL: https://pixi-silk.schmooky.dev/api/classes/PathGradient/
+
+A ramp that follows a stroke from its first point (t = 0) to its last (t = 1). Create it with [along](https://pixi-silk.schmooky.dev/api/functions/along/).
+
+## Extends
+
+- [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/)
+
+## Constructors
+
+### Constructor
+
+```ts
+new PathGradient(options: GradientOptions): PathGradient;
+```
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `options` | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/) |
+
+#### Returns
+
+`PathGradient`
+
+#### Inherited from
+
+[`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`constructor`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#constructor)
+
+## Properties
+
+| Property | Modifier | Type | Description | Inherited from | Defined in |
+| ------ | ------ | ------ | ------ | ------ | ------ |
+|  `easing` | `readonly` | [`Easing`](https://pixi-silk.schmooky.dev/api/types/Easing/) | How the ramp moves between stops. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`easing`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#easing) | gradient.ts:138 |
+|  `extend` | `readonly` | [`ExtendMode`](https://pixi-silk.schmooky.dev/api/types/ExtendMode/) | What the gradient does outside 0..1. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`extend`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#extend) | gradient.ts:140 |
+|  `space` | `readonly` | [`ColorSpace`](https://pixi-silk.schmooky.dev/api/types/ColorSpace/) | Interpolation space. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`space`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#space) | gradient.ts:136 |
+|  `units` | `readonly` | [`GradientUnits`](https://pixi-silk.schmooky.dev/api/types/GradientUnits/) | Coordinates of the gradient's points and radii. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`units`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#units) | gradient.ts:142 |
+
+## RadialGradient (Class)
+
+URL: https://pixi-silk.schmooky.dev/api/classes/RadialGradient/
+
+A ramp from a centre outwards, optionally starting at an inner radius. Create it with [radial](https://pixi-silk.schmooky.dev/api/functions/radial/).
+
+## Extends
+
+- [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/)
+
+## Constructors
+
+### Constructor
+
+```ts
+new RadialGradient(options: RadialGradientOptions): RadialGradient;
+```
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `options` | [`RadialGradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/RadialGradientOptions/) |
+
+#### Returns
+
+`RadialGradient`
+
+#### Overrides
+
+[`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`constructor`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#constructor)
+
+## Properties
+
+| Property | Modifier | Type | Description | Inherited from | Defined in |
+| ------ | ------ | ------ | ------ | ------ | ------ |
+|  `center` | `public` | [`Vec2`](https://pixi-silk.schmooky.dev/api/types/Vec2/) | Centre of the ramp. | - | gradient.ts:304 |
+|  `easing` | `readonly` | [`Easing`](https://pixi-silk.schmooky.dev/api/types/Easing/) | How the ramp moves between stops. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`easing`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#easing) | gradient.ts:138 |
+|  `extend` | `readonly` | [`ExtendMode`](https://pixi-silk.schmooky.dev/api/types/ExtendMode/) | What the gradient does outside 0..1. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`extend`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#extend) | gradient.ts:140 |
+|  `innerRadius` | `public` | `number` | Radius where the ramp starts. | - | gradient.ts:308 |
+|  `radius` | `public` | `number` | Radius where the ramp ends. | - | gradient.ts:306 |
+|  `space` | `readonly` | [`ColorSpace`](https://pixi-silk.schmooky.dev/api/types/ColorSpace/) | Interpolation space. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`space`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#space) | gradient.ts:136 |
+|  `units` | `readonly` | [`GradientUnits`](https://pixi-silk.schmooky.dev/api/types/GradientUnits/) | Coordinates of the gradient's points and radii. | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/).[`units`](https://pixi-silk.schmooky.dev/api/classes/Gradient/#units) | gradient.ts:142 |
+
+## SilkGeometry (Class)
+
+URL: https://pixi-silk.schmooky.dev/api/classes/SilkGeometry/
+
+Geometry behind every [SilkGraphics](https://pixi-silk.schmooky.dev/api/classes/SilkGraphics/): one unit quad plus an interleaved instance buffer
+(40 floats per primitive). You rarely need it directly.
+
+## Extends
+
+- `Geometry`
+
+## Constructors
+
+### Constructor
+
+```ts
+new SilkGeometry(): SilkGeometry;
+```
+
+#### Returns
+
+`SilkGeometry`
+
+#### Overrides
+
+```ts
+Geometry.constructor
+```
+
+## Properties
+
+| Property | Modifier | Type | Description | Defined in |
+| ------ | ------ | ------ | ------ | ------ |
+|  `instanceBuffer` | `readonly` | `Buffer` | Per-primitive data, grown on demand and reused across `clear()`. | SilkGraphics.ts:344 |
+|  `localBounds` | `readonly` | `Bounds` | Bounds of everything drawn, in local units (includes stroke widths and blur). | SilkGraphics.ts:346 |
+
+## Accessors
+
+### bounds
+
+#### Get Signature
+
+```ts
+get bounds(): Bounds;
+```
+
+Returns the bounds of the geometry.
+
+##### Returns
+
+`Bounds`
+
+#### Overrides
+
+```ts
+Geometry.bounds
+```
+
+## SilkGraphics (Class)
+
+URL: https://pixi-silk.schmooky.dev/api/classes/SilkGraphics/
+
+A PixiJS display object with a `Graphics`-like API. Every primitive is a signed distance field
+evaluated per pixel, so edges are smooth at any scale, rotation and device pixel ratio. Each
+object is one instanced draw call.
+
+Shapes go on the active path and are painted by [fill()](#fill) or
+[stroke()](#stroke). `stroke()` right after `fill()` paints the same shapes.
+Redrawing every frame is cheap, because [clear()](#clear) keeps the buffers.
+
+## Example
+
+```ts
+const g = new SilkGraphics()
+    .roundRect(0, 0, 160, 80, 20, 0.6).fill(0x1c1c1e)
+    .arc(80, 40, 28, -Math.PI / 2, Math.PI).stroke({ width: 8, cap: 'round', color: 0x30d158 });
+app.stage.addChild(g);
+```
+
+## Extends
+
+- `Mesh`\<[`SilkGeometry`](https://pixi-silk.schmooky.dev/api/classes/SilkGeometry/), `Shader`\>
+
+## Constructors
+
+### Constructor
+
+```ts
+new SilkGraphics(options?: SilkGraphicsOptions): SilkGraphics;
+```
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `options` | [`SilkGraphicsOptions`](https://pixi-silk.schmooky.dev/api/interfaces/SilkGraphicsOptions/) |
+
+#### Returns
+
+`SilkGraphics`
+
+#### Overrides
+
+```ts
+Mesh<SilkGeometry, Shader>.constructor
+```
+
+## Properties
+
+| Property | Modifier | Type | Description | Defined in |
+| ------ | ------ | ------ | ------ | ------ |
+|  `defaults` | `static` | `Required`\<`Omit`\<[`SilkGraphicsOptions`](https://pixi-silk.schmooky.dev/api/interfaces/SilkGraphicsOptions/), `"label"`\>\> | Settings for new objects. Change them before you create any SilkGraphics. | SilkGraphics.ts:409 |
+
+## Accessors
+
+### aaWidth
+
+#### Get Signature
+
+```ts
+get aaWidth(): number;
+```
+
+Width of the anti-aliasing ramp in device pixels. 1 is a crisp box filter, larger is softer.
+
+##### Returns
+
+`number`
+
+#### Set Signature
+
+```ts
+set aaWidth(v: number): void;
+```
+
+Sets the anti-aliasing width of this object.
+
+##### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `v` | `number` |
+
+##### Returns
+
+`void`
+
+***
+
+### dither
+
+#### Get Signature
+
+```ts
+get dither(): number;
+```
+
+Dither amplitude in 8-bit steps for gradients and blurs (0 disables). Default 1.
+
+##### Returns
+
+`number`
+
+#### Set Signature
+
+```ts
+set dither(v: number): void;
+```
+
+Sets the dither amplitude of this object.
+
+##### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `v` | `number` |
+
+##### Returns
+
+`void`
+
+***
+
+### minStrokePx
+
+#### Get Signature
+
+```ts
+get minStrokePx(): number;
+```
+
+Strokes thinner than this many device pixels keep this width and fade instead (hairlines).
+
+##### Returns
+
+`number`
+
+#### Set Signature
+
+```ts
+set minStrokePx(v: number): void;
+```
+
+Sets the hairline threshold of this object.
+
+##### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `v` | `number` |
+
+##### Returns
+
+`void`
+
+***
+
+### primitiveCount
+
+#### Get Signature
+
+```ts
+get primitiveCount(): number;
+```
+
+Number of primitives (= instances in the single draw call).
+
+##### Returns
+
+`number`
+
+## Methods
+
+### arc()
+
+```ts
+arc(
+   cx: number, 
+   cy: number, 
+   radius: number, 
+   startAngle: number, 
+   endAngle: number, 
+   anticlockwise?: boolean
+): this;
+```
+
+Open circular arc (stroke it). Angles work as in canvas. It starts its own subpath.
+
+#### Parameters
+
+| Parameter | Type | Default value |
+| ------ | ------ | ------ |
+| `cx` | `number` | `undefined` |
+| `cy` | `number` | `undefined` |
+| `radius` | `number` | `undefined` |
+| `startAngle` | `number` | `undefined` |
+| `endAngle` | `number` | `undefined` |
+| `anticlockwise` | `boolean` | `false` |
+
+#### Returns
+
+`this`
+
+***
+
+### arcSweep()
+
+```ts
+arcSweep(
+   cx: number, 
+   cy: number, 
+   radius: number, 
+   startAngle: number, 
+   sweep: number
+): this;
+```
+
+Open arc given start angle and signed sweep (positive = clockwise on screen).
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `cx` | `number` |
+| `cy` | `number` |
+| `radius` | `number` |
+| `startAngle` | `number` |
+| `sweep` | `number` |
+
+#### Returns
+
+`this`
+
+***
+
+### area()
+
+```ts
+area(
+   points: PointsInput, 
+   lower: number | PointsInput, 
+   options?: AreaOptions
+): this;
+```
+
+Area under a series. Fill it, then `stroke` draws the top line. Points must be sorted by x.
+
+#### Parameters
+
+| Parameter | Type | Description |
+| ------ | ------ | ------ |
+| `points` | [`PointsInput`](https://pixi-silk.schmooky.dev/api/types/PointsInput/) | - |
+| `lower` | `number` \| [`PointsInput`](https://pixi-silk.schmooky.dev/api/types/PointsInput/) | baseline y, or a second series with the same x values for bands |
+| `options` | [`AreaOptions`](https://pixi-silk.schmooky.dev/api/interfaces/AreaOptions/) | - |
+
+#### Returns
+
+`this`
+
+***
+
+### beginPath()
+
+```ts
+beginPath(): this;
+```
+
+Starts a new, empty path (shapes drawn so far are kept).
+
+#### Returns
+
+`this`
+
+***
+
+### bezierCurveTo()
+
+```ts
+bezierCurveTo(
+   cp1x: number, 
+   cp1y: number, 
+   cp2x: number, 
+   cp2y: number, 
+   x: number, 
+   y: number
+): this;
+```
+
+Cubic Bezier to (x, y), flattened adaptively.
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `cp1x` | `number` |
+| `cp1y` | `number` |
+| `cp2x` | `number` |
+| `cp2y` | `number` |
+| `x` | `number` |
+| `y` | `number` |
+
+#### Returns
+
+`this`
+
+***
+
+### circle()
+
+```ts
+circle(
+   x: number, 
+   y: number, 
+   radius: number
+): this;
+```
+
+Circle centred on (x, y).
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `x` | `number` |
+| `y` | `number` |
+| `radius` | `number` |
+
+#### Returns
+
+`this`
+
+***
+
+### clear()
+
+```ts
+clear(): this;
+```
+
+Removes everything. Keeps the buffers for reuse, so redrawing every frame is cheap.
+
+#### Returns
+
+`this`
+
+***
+
+### closePath()
+
+```ts
+closePath(): this;
+```
+
+Closes the current subpath back to its first point.
+
+#### Returns
+
+`this`
+
+***
+
+### containsPoint()
+
+```ts
+containsPoint(point: PointData): boolean;
+```
+
+Hit test against the real shapes (local coordinates): rings are hollow, lines count only
+within their stroke. Used by Pixi's event system when `eventMode` is set.
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `point` | `PointData` |
+
+#### Returns
+
+`boolean`
+
+#### Overrides
+
+```ts
+Mesh.containsPoint
+```
+
+***
+
+### destroy()
+
+```ts
+destroy(options?: DestroyOptions): void;
+```
+
+Destroys this sprite renderable and optionally its texture.
+
+#### Parameters
+
+| Parameter | Type | Description |
+| ------ | ------ | ------ |
+| `options?` | `DestroyOptions` | Options parameter. A boolean will act as if all options have been set to that value |
+
+#### Returns
+
+`void`
+
+#### Example
+
+```ts
+mesh.destroy();
+mesh.destroy(true);
+mesh.destroy({ texture: true, textureSource: true });
+```
+
+#### Overrides
+
+```ts
+Mesh.destroy
+```
+
+***
+
+### ellipse()
+
+```ts
+ellipse(
+   x: number, 
+   y: number, 
+   rx: number, 
+   ry: number
+): this;
+```
+
+Ellipse centred on (x, y) with an exact distance field (no polygon approximation).
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `x` | `number` |
+| `y` | `number` |
+| `rx` | `number` |
+| `ry` | `number` |
+
+#### Returns
+
+`this`
+
+***
+
+### fill()
+
+```ts
+fill(style?: FillInput): this;
+```
+
+Fills the shapes of the active path (Pixi semantics: `rect().circle().fill()` fills both).
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `style?` | [`FillInput`](https://pixi-silk.schmooky.dev/api/types/FillInput/) |
+
+#### Returns
+
+`this`
+
+***
+
+### heart()
+
+```ts
+heart(
+   cx: number, 
+   cy: number, 
+   size: number, 
+   rounding?: number
+): this;
+```
+
+Heart icon centred at (cx, cy), `size` wide. `rounding` (0..0.3) puffs it up.
+
+#### Parameters
+
+| Parameter | Type | Default value |
+| ------ | ------ | ------ |
+| `cx` | `number` | `undefined` |
+| `cy` | `number` | `undefined` |
+| `size` | `number` | `undefined` |
+| `rounding` | `number` | `0` |
+
+#### Returns
+
+`this`
+
+***
+
+### line()
+
+```ts
+line(
+   x0: number, 
+   y0: number, 
+   x1: number, 
+   y1: number
+): this;
+```
+
+Straight line (stroke it).
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `x0` | `number` |
+| `y0` | `number` |
+| `x1` | `number` |
+| `y1` | `number` |
+
+#### Returns
+
+`this`
+
+***
+
+### lineTo()
+
+```ts
+lineTo(x: number, y: number): this;
+```
+
+Straight segment from the current point to (x, y).
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `x` | `number` |
+| `y` | `number` |
+
+#### Returns
+
+`this`
+
+***
+
+### moveTo()
+
+```ts
+moveTo(x: number, y: number): this;
+```
+
+Starts a new subpath at (x, y). Paths are stroke-only.
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `x` | `number` |
+| `y` | `number` |
+
+#### Returns
+
+`this`
+
+***
+
+### pill()
+
+```ts
+pill(
+   x: number, 
+   y: number, 
+   w: number, 
+   h: number
+): this;
+```
+
+Rounded rect with fully round ends.
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `x` | `number` |
+| `y` | `number` |
+| `w` | `number` |
+| `h` | `number` |
+
+#### Returns
+
+`this`
+
+***
+
+### poly()
+
+```ts
+poly(points: PointsInput, close?: boolean): this;
+```
+
+Pixi-style polygon path. Only strokes are supported for arbitrary paths.
+
+#### Parameters
+
+| Parameter | Type | Default value |
+| ------ | ------ | ------ |
+| `points` | [`PointsInput`](https://pixi-silk.schmooky.dev/api/types/PointsInput/) | `undefined` |
+| `close` | `boolean` | `true` |
+
+#### Returns
+
+`this`
+
+***
+
+### polyline()
+
+```ts
+polyline(points: PointsInput, options?: PolylineOptions): this;
+```
+
+Polyline through points (stroke it), optionally smoothed.
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `points` | [`PointsInput`](https://pixi-silk.schmooky.dev/api/types/PointsInput/) |
+| `options` | [`PolylineOptions`](https://pixi-silk.schmooky.dev/api/interfaces/PolylineOptions/) |
+
+#### Returns
+
+`this`
+
+***
+
+### quadraticCurveTo()
+
+```ts
+quadraticCurveTo(
+   cpx: number, 
+   cpy: number, 
+   x: number, 
+   y: number
+): this;
+```
+
+Quadratic Bezier to (x, y), flattened adaptively.
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `cpx` | `number` |
+| `cpy` | `number` |
+| `x` | `number` |
+| `y` | `number` |
+
+#### Returns
+
+`this`
+
+***
+
+### rect()
+
+```ts
+rect(
+   x: number, 
+   y: number, 
+   w: number, 
+   h: number
+): this;
+```
+
+Axis-aligned rectangle (rotated by the current transform, if any).
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `x` | `number` |
+| `y` | `number` |
+| `w` | `number` |
+| `h` | `number` |
+
+#### Returns
+
+`this`
+
+***
+
+### regularPoly()
+
+```ts
+regularPoly(
+   cx: number, 
+   cy: number, 
+   radius: number, 
+   sides: number, 
+   rotation?: number, 
+   cornerRadius?: number
+): this;
+```
+
+Regular polygon (first vertex points up).
+
+#### Parameters
+
+| Parameter | Type | Default value |
+| ------ | ------ | ------ |
+| `cx` | `number` | `undefined` |
+| `cy` | `number` | `undefined` |
+| `radius` | `number` | `undefined` |
+| `sides` | `number` | `undefined` |
+| `rotation` | `number` | `0` |
+| `cornerRadius` | `number` | `0` |
+
+#### Returns
+
+`this`
+
+***
+
+### resetTransform()
+
+```ts
+resetTransform(): this;
+```
+
+Resets the current transform to identity.
+
+#### Returns
+
+`this`
+
+***
+
+### restore()
+
+```ts
+restore(): this;
+```
+
+Pops the transform pushed by the matching [save()](#save).
+
+#### Returns
+
+`this`
+
+***
+
+### rotateTransform()
+
+```ts
+rotateTransform(angle: number): this;
+```
+
+Rotates the coordinate system by `angle` radians (clockwise on screen). Rotated primitives stay exact.
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `angle` | `number` |
+
+#### Returns
+
+`this`
+
+***
+
+### roundRect()
+
+```ts
+roundRect(
+   x: number, 
+   y: number, 
+   w: number, 
+   h: number, 
+   radius?: number | number[], 
+   smoothing?: number
+): this;
+```
+
+Rectangle with rounded corners. `smoothing` above 0 turns the corners into squircles.
+
+#### Parameters
+
+| Parameter | Type | Default value | Description |
+| ------ | ------ | ------ | ------ |
+| `x` | `number` | `undefined` | - |
+| `y` | `number` | `undefined` | - |
+| `w` | `number` | `undefined` | - |
+| `h` | `number` | `undefined` | - |
+| `radius` | `number` \| `number`[] | `0` | one radius or `[topLeft, topRight, bottomRight, bottomLeft]` |
+| `smoothing` | `number` | `0` | 0..1 continuous-curvature ("squircle") corners, iOS uses about 0.6 |
+
+#### Returns
+
+`this`
+
+***
+
+### save()
+
+```ts
+save(): this;
+```
+
+Pushes the current transform (Pixi GraphicsContext API).
+
+#### Returns
+
+`this`
+
+***
+
+### scaleTransform()
+
+```ts
+scaleTransform(x: number, y?: number): this;
+```
+
+Scales the coordinate system. Stroke widths, dashes and blur scale with its uniform part.
+
+#### Parameters
+
+| Parameter | Type | Default value |
+| ------ | ------ | ------ |
+| `x` | `number` | `undefined` |
+| `y` | `number` | `x` |
+
+#### Returns
+
+`this`
+
+***
+
+### sector()
+
+```ts
+sector(
+   cx: number, 
+   cy: number, 
+   radius: number, 
+   startAngle: number, 
+   endAngle: number, 
+   innerRadius?: number, 
+   cornerRadius?: number
+): this;
+```
+
+Closed annular sector: pie slices, donut segments, gauge segments.
+
+#### Parameters
+
+| Parameter | Type | Default value | Description |
+| ------ | ------ | ------ | ------ |
+| `cx` | `number` | `undefined` | - |
+| `cy` | `number` | `undefined` | - |
+| `radius` | `number` | `undefined` | - |
+| `startAngle` | `number` | `undefined` | - |
+| `endAngle` | `number` | `undefined` | - |
+| `innerRadius` | `number` | `0` | 0 for a pie slice |
+| `cornerRadius` | `number` | `0` | rounds all corners |
+
+#### Returns
+
+`this`
+
+***
+
+### setTransform()
+
+```ts
+setTransform(
+   a: number, 
+   b: number, 
+   c: number, 
+   d: number, 
+   tx: number, 
+   ty: number
+): this;
+```
+
+Replaces the current transform with the matrix `[a c tx; b d ty]`.
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `a` | `number` |
+| `b` | `number` |
+| `c` | `number` |
+| `d` | `number` |
+| `tx` | `number` |
+| `ty` | `number` |
+
+#### Returns
+
+`this`
+
+***
+
+### star()
+
+```ts
+star(
+   cx: number, 
+   cy: number, 
+   points: number, 
+   radius: number, 
+   innerRadius?: number, 
+   rotation?: number, 
+   cornerRadius?: number
+): this;
+```
+
+Star with `points` tips. `innerRadius` defaults to a classic star.
+
+#### Parameters
+
+| Parameter | Type | Default value |
+| ------ | ------ | ------ |
+| `cx` | `number` | `undefined` |
+| `cy` | `number` | `undefined` |
+| `points` | `number` | `undefined` |
+| `radius` | `number` | `undefined` |
+| `innerRadius?` | `number` | `undefined` |
+| `rotation?` | `number` | `0` |
+| `cornerRadius?` | `number` | `0` |
+
+#### Returns
+
+`this`
+
+***
+
+### stroke()
+
+```ts
+stroke(style?: StrokeInput): this;
+```
+
+Strokes the shapes of the active path. Right after `fill()` it merges into the same instances.
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `style?` | [`StrokeInput`](https://pixi-silk.schmooky.dev/api/types/StrokeInput/) |
+
+#### Returns
+
+`this`
+
+***
+
+### translateTransform()
+
+```ts
+translateTransform(x: number, y?: number): this;
+```
+
+Moves the coordinate system. Shapes drawn next are offset by (x, y).
+
+#### Parameters
+
+| Parameter | Type | Default value |
+| ------ | ------ | ------ |
+| `x` | `number` | `undefined` |
+| `y` | `number` | `x` |
+
+#### Returns
+
+`this`
+
+***
+
+### triangle()
+
+```ts
+triangle(
+   x0: number, 
+   y0: number, 
+   x1: number, 
+   y1: number, 
+   x2: number, 
+   y2: number, 
+   cornerRadius?: number
+): this;
+```
+
+Triangle through three points, with optionally rounded corners.
+
+#### Parameters
+
+| Parameter | Type | Default value |
+| ------ | ------ | ------ |
+| `x0` | `number` | `undefined` |
+| `y0` | `number` | `undefined` |
+| `x1` | `number` | `undefined` |
+| `y1` | `number` | `undefined` |
+| `x2` | `number` | `undefined` |
+| `y2` | `number` | `undefined` |
+| `cornerRadius` | `number` | `0` |
+
+#### Returns
+
+`this`
+
+## Spring (Class)
+
+URL: https://pixi-silk.schmooky.dev/api/classes/Spring/
+
+Damped harmonic spring (semi-implicit Euler with fixed sub-steps).
+`stiffness` / `damping` follow the usual UI spring convention (e.g. 170 / 26).
+
+## Constructors
+
+### Constructor
+
+```ts
+new Spring(
+   value?: number, 
+   stiffness?: number, 
+   damping?: number
+): Spring;
+```
+
+#### Parameters
+
+| Parameter | Type | Default value |
+| ------ | ------ | ------ |
+| `value` | `number` | `0` |
+| `stiffness` | `number` | `170` |
+| `damping` | `number` | `26` |
+
+#### Returns
+
+`Spring`
+
+## Properties
+
+| Property | Type | Default value | Description | Defined in |
+| ------ | ------ | ------ | ------ | ------ |
+|  `damping` | `number` | `undefined` | Friction. Lower bounces more. | motion.ts:35 |
+|  `stiffness` | `number` | `undefined` | Pull towards the target. Higher is faster. | motion.ts:33 |
+|  `target` | `number` | `undefined` | Value the spring moves towards. | motion.ts:29 |
+|  `value` | `number` | `undefined` | Current value. | motion.ts:27 |
+|  `velocity` | `number` | `0` | Current speed, in units per second. | motion.ts:31 |
+
+## Accessors
+
+### settled
+
+#### Get Signature
+
+```ts
+get settled(): boolean;
+```
+
+True once the spring is at rest on its target.
+
+##### Returns
+
+`boolean`
+
+## Methods
+
+### step()
+
+```ts
+step(dtSeconds: number): number;
+```
+
+Advances the spring and returns the new value.
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `dtSeconds` | `number` |
+
+#### Returns
+
+`number`
+
+## along (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/along/
+
+```ts
+function along(stops: StopInput[], options?: Omit<GradientOptions, "stops" | "units">): PathGradient;
+```
+
+Gradient that follows a stroke from its first point (t = 0) to its last (t = 1).
+
+## Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `stops` | [`StopInput`](https://pixi-silk.schmooky.dev/api/types/StopInput/)[] |
+| `options` | `Omit`\<[`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/), `"stops"` \| `"units"`\> |
+
+## Returns
+
+[`PathGradient`](https://pixi-silk.schmooky.dev/api/classes/PathGradient/)
+
+## catmullRom (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/catmullRom/
+
+```ts
+function catmullRom(
+   flat: number[], 
+   closed?: boolean, 
+   step?: number, 
+   alpha?: number
+): number[];
+```
+
+Centripetal Catmull-Rom spline through the points (no cusps or self-loops).
+
+## Parameters
+
+| Parameter | Type | Default value |
+| ------ | ------ | ------ |
+| `flat` | `number`[] | `undefined` |
+| `closed` | `boolean` | `false` |
+| `step` | `number` | `2` |
+| `alpha` | `number` | `0.5` |
+
+## Returns
+
+`number`[]
+
+## conic (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/conic/
+
+```ts
+function conic(stops: StopInput[], options?: Omit<ConicGradientOptions, "stops">): ConicGradient;
+```
+
+Conic (angular) gradient. On arcs and sectors it spans the arc by default, so a ring's ramp
+always runs from its start cap to its end cap.
+
+## Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `stops` | [`StopInput`](https://pixi-silk.schmooky.dev/api/types/StopInput/)[] |
+| `options` | `Omit`\<[`ConicGradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/ConicGradientOptions/), `"stops"`\> |
+
+## Returns
+
+[`ConicGradient`](https://pixi-silk.schmooky.dev/api/classes/ConicGradient/)
+
+## createSilkApp (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/createSilkApp/
+
+```ts
+function createSilkApp(options: SilkAppOptions): Promise<SilkApp>;
+```
+
+Creates a Pixi application tuned for smooth vector output:
+
+- WebGL2 and no MSAA (analytic AA does the job, MSAA would only cost bandwidth),
+- backing store sized from `devicePixelContentBoxSize`, so every canvas pixel maps to
+  exactly one device pixel even at fractional DPRs (1.25, 1.5, 2.625 ...) - no resampling blur,
+- follows DPR changes (moving the window between displays, browser zoom),
+- unrounded coordinates for sub-pixel smooth motion,
+- filters that render at the screen resolution instead of 1x.
+
+## Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `options` | [`SilkAppOptions`](https://pixi-silk.schmooky.dev/api/interfaces/SilkAppOptions/) |
+
+## Returns
+
+`Promise`\<[`SilkApp`](https://pixi-silk.schmooky.dev/api/interfaces/SilkApp/)\>
+
+## damp (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/damp/
+
+```ts
+function damp(
+   current: number, 
+   target: number, 
+   lambda: number, 
+   dtSeconds: number
+): number;
+```
+
+Exponential approach: moves `current` towards `target`. `lambda` is about 1/seconds, higher is snappier.
+
+## Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `current` | `number` |
+| `target` | `number` |
+| `lambda` | `number` |
+| `dtSeconds` | `number` |
+
+## Returns
+
+`number`
+
+## dampAngle (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/dampAngle/
+
+```ts
+function dampAngle(
+   current: number, 
+   target: number, 
+   lambda: number, 
+   dtSeconds: number
+): number;
+```
+
+Damped angle approach along the shortest path.
+
+## Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `current` | `number` |
+| `target` | `number` |
+| `lambda` | `number` |
+| `dtSeconds` | `number` |
+
+## Returns
+
+`number`
+
+## horizontal (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/horizontal/
+
+```ts
+function horizontal(stops: StopInput[], options?: Omit<LinearGradientOptions, "stops" | "from" | "to">): LinearGradient;
+```
+
+Left-to-right linear gradient across the painted shape.
+
+## Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `stops` | [`StopInput`](https://pixi-silk.schmooky.dev/api/types/StopInput/)[] |
+| `options` | `Omit`\<[`LinearGradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/LinearGradientOptions/), `"stops"` \| `"from"` \| `"to"`\> |
+
+## Returns
+
+[`LinearGradient`](https://pixi-silk.schmooky.dev/api/classes/LinearGradient/)
+
+## linear (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/linear/
+
+```ts
+function linear(stops: StopInput[], options?: Omit<LinearGradientOptions, "stops">): LinearGradient;
+```
+
+Linear gradient. `from` / `to` default to top and bottom of the shape's box (`units: 'shape'`).
+
+## Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `stops` | [`StopInput`](https://pixi-silk.schmooky.dev/api/types/StopInput/)[] |
+| `options` | `Omit`\<[`LinearGradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/LinearGradientOptions/), `"stops"`\> |
+
+## Returns
+
+[`LinearGradient`](https://pixi-silk.schmooky.dev/api/classes/LinearGradient/)
+
+## Example
+
+```ts
+g.roundRect(0, 0, 200, 60, 16).fill(linear([0x0a84ff, 0xbf5af2], { from: [0, 0], to: [1, 1] }));
+```
+
+## linearToOklab (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/linearToOklab/
+
+```ts
+function linearToOklab(
+   r: number, 
+   g: number, 
+   b: number
+): [number, number, number];
+```
+
+Converts linear-light sRGB to OKLab (Björn Ottosson's perceptual colour space), used to interpolate gradients evenly.
+
+## Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `r` | `number` |
+| `g` | `number` |
+| `b` | `number` |
+
+## Returns
+
+\[`number`, `number`, `number`\]
+
+## monotoneX (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/monotoneX/
+
+```ts
+function monotoneX(flat: number[], step?: number): number[];
+```
+
+Monotone cubic interpolation in x (Steffen's method, same family as d3's monotoneX).
+Never overshoots the data: peaks stay at the data points, flat runs stay flat.
+`step` is the target spacing of the output samples in local units.
+
+## Parameters
+
+| Parameter | Type | Default value |
+| ------ | ------ | ------ |
+| `flat` | `number`[] | `undefined` |
+| `step` | `number` | `2` |
+
+## Returns
+
+`number`[]
+
+## oklabToLinear (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/oklabToLinear/
+
+```ts
+function oklabToLinear(
+   L: number, 
+   a: number, 
+   b: number
+): [number, number, number];
+```
+
+Converts OKLab back to linear-light sRGB. Out-of-gamut colours fall outside 0..1, so callers clamp.
+
+## Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `L` | `number` |
+| `a` | `number` |
+| `b` | `number` |
+
+## Returns
+
+\[`number`, `number`, `number`\]
+
+## parseColor (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/parseColor/
+
+```ts
+function parseColor(value: ColorSource, alpha?: number): RGBA;
+```
+
+Any Pixi `ColorSource` as straight sRGB `[r, g, b, a]` (0..1), with `alpha` multiplied in. Memoised.
+
+## Parameters
+
+| Parameter | Type | Default value |
+| ------ | ------ | ------ |
+| `value` | `ColorSource` | `undefined` |
+| `alpha` | `number` | `1` |
+
+## Returns
+
+[`RGBA`](https://pixi-silk.schmooky.dev/api/types/RGBA/)
+
+## radial (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/radial/
+
+```ts
+function radial(stops: StopInput[], options?: Omit<RadialGradientOptions, "stops">): RadialGradient;
+```
+
+Radial gradient from `center` (default the box centre) out to `radius`, optionally starting at `innerRadius`.
+
+## Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `stops` | [`StopInput`](https://pixi-silk.schmooky.dev/api/types/StopInput/)[] |
+| `options` | `Omit`\<[`RadialGradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/RadialGradientOptions/), `"stops"`\> |
+
+## Returns
+
+[`RadialGradient`](https://pixi-silk.schmooky.dev/api/classes/RadialGradient/)
+
+## toFlat (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/toFlat/
+
+```ts
+function toFlat(points: PointsInput): number[];
+```
+
+Normalises `[x0, y0, x1, y1, ...]` or `[{x, y}, ...]` into a flat number array.
+
+## Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `points` | [`PointsInput`](https://pixi-silk.schmooky.dev/api/types/PointsInput/) |
+
+## Returns
+
+`number`[]
+
+## vertical (Function)
+
+URL: https://pixi-silk.schmooky.dev/api/functions/vertical/
+
+```ts
+function vertical(stops: StopInput[], options?: Omit<LinearGradientOptions, "stops" | "from" | "to">): LinearGradient;
+```
+
+Top-to-bottom linear gradient across the painted shape.
+
+## Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `stops` | [`StopInput`](https://pixi-silk.schmooky.dev/api/types/StopInput/)[] |
+| `options` | `Omit`\<[`LinearGradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/LinearGradientOptions/), `"stops"` \| `"from"` \| `"to"`\> |
+
+## Returns
+
+[`LinearGradient`](https://pixi-silk.schmooky.dev/api/classes/LinearGradient/)
+
+## AreaOptions (Interface)
+
+URL: https://pixi-silk.schmooky.dev/api/interfaces/AreaOptions/
+
+Options of `area()`: monotone smoothing of the series and its sample spacing.
+
+## Properties
+
+| Property | Type | Description | Defined in |
+| ------ | ------ | ------ | ------ |
+|  `smooth?` | `false` \| `"monotone"` | `monotone` draws a smooth curve through the points that never overshoots. Default false. | SilkGraphics.ts:83 |
+|  `step?` | `number` | Sample spacing for smoothing, local units. Default 2. | SilkGraphics.ts:85 |
+
+## ConicGradientOptions (Interface)
+
+URL: https://pixi-silk.schmooky.dev/api/interfaces/ConicGradientOptions/
+
+Options of [conic](https://pixi-silk.schmooky.dev/api/functions/conic/): stops plus centre, start angle and sweep.
+
+## Extends
+
+- [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/)
+
+## Properties
+
+| Property | Type | Description | Inherited from | Defined in |
+| ------ | ------ | ------ | ------ | ------ |
+|  `center?` | [`Vec2`](https://pixi-silk.schmooky.dev/api/types/Vec2/) | Default `[0.5, 0.5]`. | - | gradient.ts:332 |
+|  `easing?` | [`Easing`](https://pixi-silk.schmooky.dev/api/types/Easing/) | How the ramp moves between stops. Default `linear`. | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`easing`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#easing) | gradient.ts:44 |
+|  `extend?` | [`ExtendMode`](https://pixi-silk.schmooky.dev/api/types/ExtendMode/) | What the gradient does outside 0..1. Default `pad`. | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`extend`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#extend) | gradient.ts:46 |
+|  `space?` | [`ColorSpace`](https://pixi-silk.schmooky.dev/api/types/ColorSpace/) | Interpolation space. OKLab keeps hue and lightness perceptually even. Default `oklab`. | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`space`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#space) | gradient.ts:42 |
+|  `startAngle?` | `number` | Angle (radians, y-down so positive is clockwise) where the ramp starts. Defaults to the arc start for arcs/sectors, otherwise 12 o'clock. | - | gradient.ts:337 |
+|  `stops` | [`StopInput`](https://pixi-silk.schmooky.dev/api/types/StopInput/)[] | Colour stops. Bare colours are spread evenly. See [StopInput](https://pixi-silk.schmooky.dev/api/types/StopInput/). | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`stops`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#stops) | gradient.ts:40 |
+|  `sweep?` | `number` | Angular length of the ramp. Defaults to the arc sweep for arcs/sectors, otherwise a full turn. | - | gradient.ts:339 |
+|  `units?` | [`GradientUnits`](https://pixi-silk.schmooky.dev/api/types/GradientUnits/) | Coordinates of the gradient's points and radii: each shape's box (`shape`, default) or local units (`local`). | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`units`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#units) | gradient.ts:48 |
+
+## FillStyle (Interface)
+
+URL: https://pixi-silk.schmooky.dev/api/interfaces/FillStyle/
+
+How a fill is painted: a colour, a gradient, opacity and an optional gaussian blur for glows and soft shadows.
+
+## Extended by
+
+- [`StrokeStyle`](https://pixi-silk.schmooky.dev/api/interfaces/StrokeStyle/)
+
+## Properties
+
+| Property | Type | Description | Defined in |
+| ------ | ------ | ------ | ------ |
+|  `alpha?` | `number` | Opacity from 0 to 1. Default 1. | SilkGraphics.ts:31 |
+|  `blur?` | `number` | Gaussian blur radius (standard deviation, local units). Great for glows and soft shadows. | SilkGraphics.ts:35 |
+|  `color?` | `ColorSource` | Colour, any Pixi `ColorSource`. With a gradient, it tints the gradient. | SilkGraphics.ts:29 |
+|  `gradient?` | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/) | Gradient paint. `color` (if given) tints it. | SilkGraphics.ts:33 |
+
+## GradientOptions (Interface)
+
+URL: https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/
+
+Options shared by every gradient: colour stops, interpolation space, easing, extend mode and units.
+
+## Extended by
+
+- [`ConicGradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/ConicGradientOptions/)
+- [`LinearGradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/LinearGradientOptions/)
+- [`RadialGradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/RadialGradientOptions/)
+
+## Properties
+
+| Property | Type | Description | Defined in |
+| ------ | ------ | ------ | ------ |
+|  `easing?` | [`Easing`](https://pixi-silk.schmooky.dev/api/types/Easing/) | How the ramp moves between stops. Default `linear`. | gradient.ts:44 |
+|  `extend?` | [`ExtendMode`](https://pixi-silk.schmooky.dev/api/types/ExtendMode/) | What the gradient does outside 0..1. Default `pad`. | gradient.ts:46 |
+|  `space?` | [`ColorSpace`](https://pixi-silk.schmooky.dev/api/types/ColorSpace/) | Interpolation space. OKLab keeps hue and lightness perceptually even. Default `oklab`. | gradient.ts:42 |
+|  `stops` | [`StopInput`](https://pixi-silk.schmooky.dev/api/types/StopInput/)[] | Colour stops. Bare colours are spread evenly. See [StopInput](https://pixi-silk.schmooky.dev/api/types/StopInput/). | gradient.ts:40 |
+|  `units?` | [`GradientUnits`](https://pixi-silk.schmooky.dev/api/types/GradientUnits/) | Coordinates of the gradient's points and radii: each shape's box (`shape`, default) or local units (`local`). | gradient.ts:48 |
+
+## LinearGradientOptions (Interface)
+
+URL: https://pixi-silk.schmooky.dev/api/interfaces/LinearGradientOptions/
+
+Options of [linear](https://pixi-silk.schmooky.dev/api/functions/linear/): stops plus the start and end points of the ramp.
+
+## Extends
+
+- [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/)
+
+## Properties
+
+| Property | Type | Description | Inherited from | Defined in |
+| ------ | ------ | ------ | ------ | ------ |
+|  `easing?` | [`Easing`](https://pixi-silk.schmooky.dev/api/types/Easing/) | How the ramp moves between stops. Default `linear`. | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`easing`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#easing) | gradient.ts:44 |
+|  `extend?` | [`ExtendMode`](https://pixi-silk.schmooky.dev/api/types/ExtendMode/) | What the gradient does outside 0..1. Default `pad`. | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`extend`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#extend) | gradient.ts:46 |
+|  `from?` | [`Vec2`](https://pixi-silk.schmooky.dev/api/types/Vec2/) | Start point. Default `[0, 0]` (top). | - | gradient.ts:257 |
+|  `space?` | [`ColorSpace`](https://pixi-silk.schmooky.dev/api/types/ColorSpace/) | Interpolation space. OKLab keeps hue and lightness perceptually even. Default `oklab`. | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`space`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#space) | gradient.ts:42 |
+|  `stops` | [`StopInput`](https://pixi-silk.schmooky.dev/api/types/StopInput/)[] | Colour stops. Bare colours are spread evenly. See [StopInput](https://pixi-silk.schmooky.dev/api/types/StopInput/). | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`stops`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#stops) | gradient.ts:40 |
+|  `to?` | [`Vec2`](https://pixi-silk.schmooky.dev/api/types/Vec2/) | End point. Default `[0, 1]` (bottom). | - | gradient.ts:259 |
+|  `units?` | [`GradientUnits`](https://pixi-silk.schmooky.dev/api/types/GradientUnits/) | Coordinates of the gradient's points and radii: each shape's box (`shape`, default) or local units (`local`). | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`units`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#units) | gradient.ts:48 |
+
+## PolylineOptions (Interface)
+
+URL: https://pixi-silk.schmooky.dev/api/interfaces/PolylineOptions/
+
+Options of `polyline()`: closed loops and monotone or Catmull-Rom smoothing of the points.
+
+## Properties
+
+| Property | Type | Description | Defined in |
+| ------ | ------ | ------ | ------ |
+|  `closed?` | `boolean` | Connect the last point back to the first. Default false. | SilkGraphics.ts:73 |
+|  `smooth?` | `false` \| `"monotone"` \| `"catmull"` | Resample through a smooth curve. `monotone` never overshoots (charts), `catmull` for free paths. | SilkGraphics.ts:75 |
+|  `step?` | `number` | Sample spacing for smoothing, local units. Default 2. | SilkGraphics.ts:77 |
+
+## RadialGradientOptions (Interface)
+
+URL: https://pixi-silk.schmooky.dev/api/interfaces/RadialGradientOptions/
+
+Options of [radial](https://pixi-silk.schmooky.dev/api/functions/radial/): stops plus centre, outer radius and inner radius.
+
+## Extends
+
+- [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/)
+
+## Properties
+
+| Property | Type | Description | Inherited from | Defined in |
+| ------ | ------ | ------ | ------ | ------ |
+|  `center?` | [`Vec2`](https://pixi-silk.schmooky.dev/api/types/Vec2/) | Default `[0.5, 0.5]`. | - | gradient.ts:292 |
+|  `easing?` | [`Easing`](https://pixi-silk.schmooky.dev/api/types/Easing/) | How the ramp moves between stops. Default `linear`. | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`easing`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#easing) | gradient.ts:44 |
+|  `extend?` | [`ExtendMode`](https://pixi-silk.schmooky.dev/api/types/ExtendMode/) | What the gradient does outside 0..1. Default `pad`. | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`extend`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#extend) | gradient.ts:46 |
+|  `innerRadius?` | `number` | Radius where the ramp starts. Default `0`. | - | gradient.ts:296 |
+|  `radius?` | `number` | Outer radius. In shape units it is a fraction of the larger side. Default `0.5`. | - | gradient.ts:294 |
+|  `space?` | [`ColorSpace`](https://pixi-silk.schmooky.dev/api/types/ColorSpace/) | Interpolation space. OKLab keeps hue and lightness perceptually even. Default `oklab`. | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`space`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#space) | gradient.ts:42 |
+|  `stops` | [`StopInput`](https://pixi-silk.schmooky.dev/api/types/StopInput/)[] | Colour stops. Bare colours are spread evenly. See [StopInput](https://pixi-silk.schmooky.dev/api/types/StopInput/). | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`stops`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#stops) | gradient.ts:40 |
+|  `units?` | [`GradientUnits`](https://pixi-silk.schmooky.dev/api/types/GradientUnits/) | Coordinates of the gradient's points and radii: each shape's box (`shape`, default) or local units (`local`). | [`GradientOptions`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/).[`units`](https://pixi-silk.schmooky.dev/api/interfaces/GradientOptions/#units) | gradient.ts:48 |
+
+## SilkApp (Interface)
+
+URL: https://pixi-silk.schmooky.dev/api/interfaces/SilkApp/
+
+What [createSilkApp](https://pixi-silk.schmooky.dev/api/functions/createSilkApp/) returns: the Pixi application, its CSS size and resolution, and helpers to change or destroy it.
+
+## Properties
+
+| Property | Modifier | Type | Description | Defined in |
+| ------ | ------ | ------ | ------ | ------ |
+|  `app` | `public` | `Application` | The Pixi application. | app.ts:29 |
+|  `height` | `readonly` | `number` | Current height in CSS pixels. | app.ts:33 |
+|  `resolution` | `readonly` | `number` | Current renderer resolution (device pixels per CSS pixel). | app.ts:35 |
+|  `width` | `readonly` | `number` | Current width in CSS pixels. | app.ts:31 |
+
+## Methods
+
+### destroy()
+
+```ts
+destroy(): void;
+```
+
+Stops observers, destroys the stage and renderer and removes the canvas. Safe with several apps on a page.
+
+#### Returns
+
+`void`
+
+***
+
+### setResolution()
+
+```ts
+setResolution(resolution: number | null): void;
+```
+
+Forces a resolution, for example to compare 1x and 2x. `null` returns to devicePixelRatio.
+
+#### Parameters
+
+| Parameter | Type |
+| ------ | ------ |
+| `resolution` | `number` \| `null` |
+
+#### Returns
+
+`void`
+
+## SilkAppOptions (Interface)
+
+URL: https://pixi-silk.schmooky.dev/api/interfaces/SilkAppOptions/
+
+Options of [createSilkApp](https://pixi-silk.schmooky.dev/api/functions/createSilkApp/): Pixi application options plus the element to fill, DPR limits and touch behaviour.
+
+## Extends
+
+- `Partial`\<`ApplicationOptions`\>
+
+## Properties
+
+| Property | Type | Description | Defined in |
+| ------ | ------ | ------ | ------ |
+|  `fixedResolution?` | `number` | Force a resolution instead of following devicePixelRatio. | app.ts:10 |
+|  `inheritFilterResolution?` | `boolean` | Pixi filters render at resolution 1 by default, which blurs everything behind a filter on retina screens. When true (default) new filters inherit the renderer resolution. | app.ts:17 |
+|  `maxResolution?` | `number` | Upper bound for the resolution (DPR). Default 3. | app.ts:8 |
+|  `onResize?` | (`width`: `number`, `height`: `number`, `resolution`: `number`) => `void` | Called after every size / resolution change with the size in CSS pixels. | app.ts:12 |
+|  `parent` | `HTMLElement` | Element the canvas fills (it must have a size). | app.ts:6 |
+|  `touchAction?` | `string` | CSS touch-action for the canvas. Pixi sets `none`, which blocks page scrolling on touch screens. The default `pan-y pinch-zoom` lets pages scroll while taps and hovers still reach Pixi. Use `none` for canvases that handle drags themselves. | app.ts:23 |
+
+## SilkGraphicsOptions (Interface)
+
+URL: https://pixi-silk.schmooky.dev/api/interfaces/SilkGraphicsOptions/
+
+Per-object rendering settings of a [SilkGraphics](https://pixi-silk.schmooky.dev/api/classes/SilkGraphics/): dithering, anti-aliasing width and hairline threshold.
+
+## Properties
+
+| Property | Type | Description | Defined in |
+| ------ | ------ | ------ | ------ |
+|  `aaWidth?` | `number` | AA ramp width in device pixels. 1 = crisp box filter. Default 1. | SilkGraphics.ts:93 |
+|  `dither?` | `number` | Dither amplitude in 8-bit steps (0 disables). Applied to gradients and blurs only. Default 1. | SilkGraphics.ts:91 |
+|  `label?` | `string` | Pixi label of the object, for debugging. Default `SilkGraphics`. | SilkGraphics.ts:97 |
+|  `minStrokePx?` | `number` | Strokes thinner than this (device px) keep this width and fade instead. Default 1. | SilkGraphics.ts:95 |
+
+## StrokeStyle (Interface)
+
+URL: https://pixi-silk.schmooky.dev/api/interfaces/StrokeStyle/
+
+How a stroke is painted: width (or tapered widths), alignment, caps, dashes, plus everything in [FillStyle](https://pixi-silk.schmooky.dev/api/interfaces/FillStyle/).
+
+## Extends
+
+- [`FillStyle`](https://pixi-silk.schmooky.dev/api/interfaces/FillStyle/)
+
+## Properties
+
+| Property | Type | Description | Inherited from | Defined in |
+| ------ | ------ | ------ | ------ | ------ |
+|  `alignment?` | `number` \| `"center"` \| `"inside"` \| `"outside"` | `inside` | `center` | `outside`, or Pixi's numeric alignment (1 inside, 0.5 center, 0 outside). | - | SilkGraphics.ts:52 |
+|  `alpha?` | `number` | Opacity from 0 to 1. Default 1. | [`FillStyle`](https://pixi-silk.schmooky.dev/api/interfaces/FillStyle/).[`alpha`](https://pixi-silk.schmooky.dev/api/interfaces/FillStyle/#alpha) | SilkGraphics.ts:31 |
+|  `blur?` | `number` | Gaussian blur radius (standard deviation, local units). Great for glows and soft shadows. | [`FillStyle`](https://pixi-silk.schmooky.dev/api/interfaces/FillStyle/).[`blur`](https://pixi-silk.schmooky.dev/api/interfaces/FillStyle/#blur) | SilkGraphics.ts:35 |
+|  `cap?` | [`LineCap`](https://pixi-silk.schmooky.dev/api/types/LineCap/) | Ends of open paths and of dashes. Default `butt` (Pixi default). | - | SilkGraphics.ts:54 |
+|  `color?` | `ColorSource` | Colour, any Pixi `ColorSource`. With a gradient, it tints the gradient. | [`FillStyle`](https://pixi-silk.schmooky.dev/api/interfaces/FillStyle/).[`color`](https://pixi-silk.schmooky.dev/api/interfaces/FillStyle/#color) | SilkGraphics.ts:29 |
+|  `dash?` | `number` \| \[`number`, `number`\] | `[dash, gap]` or a single number for equal dash and gap. A 0 dash with round caps gives dots. | - | SilkGraphics.ts:56 |
+|  `dashFit?` | `boolean` | On closed outlines stretch the pattern so it tiles without a seam. Default true. | - | SilkGraphics.ts:60 |
+|  `dashOffset?` | `number` | Shifts the dash pattern along the path, in local units. Default 0. | - | SilkGraphics.ts:58 |
+|  `gradient?` | [`Gradient`](https://pixi-silk.schmooky.dev/api/classes/Gradient/) | Gradient paint. `color` (if given) tints it. | [`FillStyle`](https://pixi-silk.schmooky.dev/api/interfaces/FillStyle/).[`gradient`](https://pixi-silk.schmooky.dev/api/interfaces/FillStyle/#gradient) | SilkGraphics.ts:33 |
+|  `join?` | `"round"` \| `"miter"` \| `"bevel"` | Accepted for Pixi compatibility. Joins are always round, the smoothest choice. | - | SilkGraphics.ts:62 |
+|  `miterLimit?` | `number` | Accepted for Pixi compatibility and ignored. | - | SilkGraphics.ts:64 |
+|  `width?` | `number` \| `number`[] | Default 1. On polylines an array tapers the stroke: `[start, end]` interpolates along the path length, one value per point sets each vertex. | - | SilkGraphics.ts:50 |
+
+## ColorSpace (Type)
+
+URL: https://pixi-silk.schmooky.dev/api/types/ColorSpace/
+
+```ts
+type ColorSpace = "oklab" | "srgb" | "linear";
+```
+
+Colour space gradients are interpolated in: perceptual OKLab (default), linear light, or plain sRGB.
+
+## Easing (Type)
+
+URL: https://pixi-silk.schmooky.dev/api/types/Easing/
+
+```ts
+type Easing = "linear" | "smooth" | ((t: number) => number);
+```
+
+How the ramp moves between stops.
+
+- `linear`: piecewise linear between stops (CSS behaviour).
+- `smooth`: monotone cubic spline through the stops with eased ends. Removes the
+  Mach bands you see at every stop of a linear ramp and never overshoots.
+- a function remaps the gradient parameter before lookup (e.g. an easing curve for scrims).
+
+## ExtendMode (Type)
+
+URL: https://pixi-silk.schmooky.dev/api/types/ExtendMode/
+
+```ts
+type ExtendMode = "pad" | "repeat" | "reflect";
+```
+
+What a gradient does outside 0..1: hold the end colours (`pad`), tile (`repeat`) or mirror (`reflect`).
+
+## FillInput (Type)
+
+URL: https://pixi-silk.schmooky.dev/api/types/FillInput/
+
+```ts
+type FillInput = 
+  | ColorSource
+  | Gradient
+  | FillStyle;
+```
+
+What `fill()` accepts: any Pixi colour, a gradient or a [FillStyle](https://pixi-silk.schmooky.dev/api/interfaces/FillStyle/).
+
+## GradientUnits (Type)
+
+URL: https://pixi-silk.schmooky.dev/api/types/GradientUnits/
+
+```ts
+type GradientUnits = "shape" | "local";
+```
+
+Gradient coordinates: `shape` = fractions of each painted shape's box, `local` = the graphics' local units (one ramp across many shapes).
+
+## LineCap (Type)
+
+URL: https://pixi-silk.schmooky.dev/api/types/LineCap/
+
+```ts
+type LineCap = "butt" | "round" | "square";
+```
+
+Shape of the ends of open paths and of every dash: flat, round or square.
+
+## PointsInput (Type)
+
+URL: https://pixi-silk.schmooky.dev/api/types/PointsInput/
+
+```ts
+type PointsInput = number[] | Float32Array | Float64Array | PointData[];
+```
+
+Points as a flat `[x0, y0, x1, y1, ...]` array, a typed array, or an array of `{ x, y }` objects.
+
+## RGBA (Type)
+
+URL: https://pixi-silk.schmooky.dev/api/types/RGBA/
+
+```ts
+type RGBA = [number, number, number, number];
+```
+
+Straight (non-premultiplied) sRGB colour with alpha, all channels 0..1, as returned by [parseColor](https://pixi-silk.schmooky.dev/api/functions/parseColor/).
+
+## StopInput (Type)
+
+URL: https://pixi-silk.schmooky.dev/api/types/StopInput/
+
+```ts
+type StopInput = 
+  | ColorSource
+  | [number, ColorSource]
+  | [number, ColorSource, number]
+  | {
+  alpha?: number;
+  color: ColorSource;
+  offset: number;
+};
+```
+
+A color stop: a bare color (stops are spread evenly), `[offset, color]`,
+`[offset, color, alpha]` or `{ offset, color, alpha }`.
+
+## Union Members
+
+`ColorSource`
+
+***
+
+\[`number`, `ColorSource`\]
+
+***
+
+\[`number`, `ColorSource`, `number`\]
+
+***
+
+### Type Literal
+
+```ts
+{
+  alpha?: number;
+  color: ColorSource;
+  offset: number;
+}
+```
+
+| Name | Type | Description | Defined in |
+| ------ | ------ | ------ | ------ |
+| `alpha?` | `number` | Opacity of the stop, from 0 to 1. Default 1. | gradient.ts:19 |
+| `color` | `ColorSource` | Colour of the stop. | gradient.ts:17 |
+| `offset` | `number` | Position on the ramp, from 0 to 1. | gradient.ts:15 |
+
+## StrokeInput (Type)
+
+URL: https://pixi-silk.schmooky.dev/api/types/StrokeInput/
+
+```ts
+type StrokeInput = 
+  | ColorSource
+  | Gradient
+  | StrokeStyle;
+```
+
+What `stroke()` accepts: any Pixi colour, a gradient or a [StrokeStyle](https://pixi-silk.schmooky.dev/api/interfaces/StrokeStyle/).
+
+## Vec2 (Type)
+
+URL: https://pixi-silk.schmooky.dev/api/types/Vec2/
+
+```ts
+type Vec2 = [number, number];
+```
+
+A point `[x, y]`. In `shape` units, x and y are fractions of the painted shape's box.
+
+## ease (Variable)
+
+URL: https://pixi-silk.schmooky.dev/api/variables/ease/
+
+```ts
+const ease: {
+  inOutCubic: (t: number) => number;
+  inOutSine: (t: number) => number;
+  outCubic: (t: number) => number;
+  outExpo: (t: number) => number;
+};
+```
+
+Easing curves for tweens (t from 0 to 1): inOutCubic, outCubic, inOutSine, outExpo.
+
+## Type Declaration
+
+| Name | Type | Description | Defined in |
+| ------ | ------ | ------ | ------ |
+|  `inOutCubic()` | (`t`: `number`) => `number` | Slow start, fast middle, slow end. | motion.ts:70 |
+|  `inOutSine()` | (`t`: `number`) => `number` | Gentle start and end. | motion.ts:74 |
+|  `outCubic()` | (`t`: `number`) => `number` | Fast start, slow end. | motion.ts:72 |
+|  `outExpo()` | (`t`: `number`) => `number` | Sharp start, long soft landing. | motion.ts:76 |
+
+---
+
+# FAQ
+
+## How do I enable anti-aliasing in PixiJS v8?
+
+Pass `antialias: true` to `app.init()` for MSAA on the main canvas. For sharp output on retina screens, add `resolution: window.devicePixelRatio`. Set `autoDensity: true` too. MSAA uses four samples per pixel. It skips filters and render textures unless you opt them in. For exact anti-aliasing everywhere, draw vector shapes with `SilkGraphics` from pixi-silk and keep `antialias: false`.
+
+## Why do PixiJS v8 Graphics look jagged or blurry?
+
+PixiJS v8 tessellates Graphics into triangles when you draw, and only MSAA (`antialias: true`) anti-aliases them. Scaled curves show facets, and thin lines crawl between pixels. Filters and render textures stay aliased unless you opt them into MSAA. Filters default to resolution 1, which blurs them on retina screens. pixi-silk replaces the triangles with exact per-pixel distance fields.
+
+## What is pixi-silk?
+
+pixi-silk is an MIT-licensed TypeScript library for PixiJS v8. Its `SilkGraphics` display object has a Graphics-like API. It draws rects, squircles, circles, arcs, lines, paths, areas and more as signed distance fields with analytic anti-aliasing. You also get OKLab gradients, glows, dashes and a DPR-exact app helper, `createSilkApp`.
+
+## What is analytic anti-aliasing?
+
+Analytic anti-aliasing computes each edge pixel's coverage exactly from the shape's geometry, not from a few samples. For each pixel, pixi-silk divides the signed distance to the shape by the size of one device pixel. Edges stay smooth and exact at any zoom, rotation and resolution.
+
+## MSAA or SDF anti-aliasing: which is better for 2D graphics?
+
+SDF (signed distance field) anti-aliasing is better for vector UI, charts and icons. It gives continuous coverage, not MSAA's five levels per pixel. It handles hairlines and zoom, and works inside filters and render textures without extra memory. MSAA is simpler for arbitrary triangle meshes.
+
+## Is there a PixiJS v8 version of @pixi/graphics-smooth?
+
+Not as of September 2026. `@pixi/graphics-smooth` targets PixiJS v7 (its 1.1 line requires PixiJS 7.2 or newer v7). For smooth, anti-aliased Graphics on PixiJS v8, use pixi-silk's `SilkGraphics`. It has a v8-style `fill()` and `stroke()` API.
+
+## How do I draw smooth circles and curves in PixiJS?
+
+Use `SilkGraphics`. It evaluates `circle`, `ellipse`, `arc` and rounded corners exactly per pixel, so they stay round at any zoom. With plain Graphics, raise `bezierSmoothness` in `app.init()` and enable MSAA. Curves get finer but stay polygons.
+
+## Why do thin lines flicker or disappear in PixiJS?
+
+A line thinner than one device pixel covers only part of each pixel. Sampling hits it on some pixels and misses it on others. pixi-silk keeps these hairlines one pixel wide and scales their opacity with their width. They fade smoothly instead of breaking up.
+
+## Is pixi-silk a replacement for Graphics?
+
+Yes, for most UI and chart drawing. `SilkGraphics` has the same active-path, fill and stroke API. It can only stroke free-form paths for now. It draws all joins round and does not support texture fills or `svg()`. You can use Graphics and SilkGraphics side by side.
+
+## Does pixi-silk need MSAA or antialias: true?
+
+No. pixi-silk computes coverage analytically per pixel, so create the app with `antialias: false` (`createSilkApp` does). MSAA only adds memory bandwidth and does not improve Silk's edges.
+
+## How fast is pixi-silk?
+
+Each SilkGraphics is one instanced draw call. Every primitive writes 40 floats. Rebuilding 50,000 primitives every frame costs about 12 ms of CPU on a laptop. Typical UIs with a few hundred primitives cost well under half a millisecond.
+
+## Does pixi-silk work with WebGPU?
+
+Not yet. The shader is GLSL for WebGL2, so create your app with `preference: 'webgl'` (`createSilkApp` does). A WGSL version is planned.
+
+## How do I draw a squircle (iOS-style rounded rectangle) in PixiJS?
+
+Use `g.roundRect(x, y, width, height, radius, smoothing)` with smoothing between 0 and 1. iOS uses about 0.6. The corners become superellipse arcs with continuous curvature. At 45 degrees, they are exactly as deep as a circular corner of the same radius.
+
+## How do I make gradients in PixiJS without banding?
+
+Use pixi-silk's `linear`, `vertical`, `radial`, `conic` or `along`, and pass the gradient to `fill` or `stroke`. pixi-silk bakes every gradient into a half-float atlas. Dithering each sample by half an 8-bit step hides banding in dark, wide gradients. Interpolation happens in OKLab by default, so mixes stay bright and even.
+
+## How do I add a glow or soft shadow to a shape in PixiJS without filters?
+
+Give the paint a `blur`: `g.circle(0, 0, 40).fill({ color: 0xff375f, blur: 12 })`. pixi-silk blurs the shape's distance field analytically with a gaussian. Glows and soft shadows cost the same as a normal shape and need no filter or render texture.
+
+## Why is my PixiJS canvas blurry on retina or high-DPI screens?
+
+Usually the canvas backing store does not match the device pixels, or a filter renders at resolution 1. Use `createSilkApp`. It sizes the canvas from `devicePixelContentBoxSize`, so each canvas pixel is one screen pixel, even at fractional ratios like 1.5. It also makes filters inherit the screen resolution.
+
+## Can I use pixi-silk in React, Vue or Svelte?
+
+Yes. SilkGraphics is a plain PixiJS display object. Create the app in an effect or mount hook with `createSilkApp({ parent: element })`. Keep references to your SilkGraphics objects and call `destroy()` on unmount. The docs site mounts its live demos from React components this way.
+
+## Do pointer events work on SilkGraphics?
+
+Yes. Set `eventMode = 'static'` and listen as usual. Hit tests evaluate the real distance fields on the CPU. A stroked circle is hollow, and a line reacts only within its stroke width.
+
+## How do I draw charts with PixiJS?
+
+With `SilkGraphics`, use `area(points, baseline, { smooth: 'monotone' })` for filled areas, `polyline` for lines, `roundRect` for bars and dashed `line`s for guides. Monotone smoothing never overshoots the data. A typical area fill is a vertical gradient that fades to transparent.
+
+## What license is pixi-silk under?
+
+MIT. It is free for commercial and open-source use.
