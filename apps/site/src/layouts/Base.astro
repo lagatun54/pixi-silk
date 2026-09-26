@@ -28,6 +28,13 @@ const {
             // dark unless the visitor chose light: set before first paint so nothing flashes
             document.documentElement.classList.toggle('dark', localStorage.getItem('theme') !== 'light');
         </script>
+        {/* Some static hosts (Timeweb's frontend apps) answer unknown URLs with the home page.
+            Send those visitors to the real 404 page, which is noindex. */}
+        {path === '/' && (
+            <script is:inline>
+                if (location.pathname !== '/' && location.pathname !== '/index.html') location.replace('/404.html');
+            </script>
+        )}
         <SEO title={title} description={description} path={path} image={image ?? ogUrlForPath(path)} type={type} article={article} keywords={keywords} markdown={markdown} jsonLd={jsonLd} noIndex={noIndex} />
         <link rel="preload" href="/fonts/Inter-400.woff" as="font" type="font/woff" crossorigin />
     </head>

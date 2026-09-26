@@ -70,31 +70,29 @@ After that, merged changesets open a "Version Packages" PR, and merging it publi
 
 ## Deploying the docs site
 
-The site is static and served at https://pixi-silk.schmooky.dev from Timeweb Cloud App Platform,
-built from the root `Dockerfile` (static Astro build served by nginx, config in `deploy/nginx.conf`):
+The site is static. Timeweb Cloud App Platform serves it at https://pixi-silk.schmooky.dev as a
+frontend app in Frankfurt (`de-1`), in the "Schmooky Games" project. Every push to `main` deploys.
 
-1. In App Platform, create an app from the GitHub repository, branch `main`, with auto-deploy on.
-2. Framework: **Dockerfile** (repository root). The container listens on port **8080**. The health
-   check path is `/healthz`. No environment variables are needed.
-3. Attach the domain `pixi-silk.schmooky.dev` (DNS record to the app, as shown in the panel) and
-   enable the free SSL certificate.
+- Type: frontend. Framework: `another`. Node 24.
+- Build command: `pnpm run site:build`. Index directory: `/apps/site/dist/`.
+- Domain: `pixi-silk.schmooky.dev`, attached in the app's settings. The `schmooky.dev` zone is on
+  Timeweb DNS, so the record and the certificate are created there.
+- Environment: none. `SITE_URL` defaults to the production origin. To add search console meta tags,
+  set `GOOGLE_SITE_VERIFICATION`, `YANDEX_VERIFICATION` or `BING_SITE_VERIFICATION` in the app's
+  environment, or verify with a DNS TXT record.
 
-Build settings are Docker build arguments with defaults in the `Dockerfile`:
+Frontend apps run on Timeweb's own web server. It serves the files as they are, with three limits.
+It does not compress (a docs page is 71 kB instead of 13 kB gzipped). It sends no long cache headers.
+It answers unknown URLs with the home page and status 200, and a script on the home page sends
+those visitors to `/404.html`.
 
-- `SITE_URL`: the production origin.
-- `GOOGLE_SITE_VERIFICATION`, `YANDEX_VERIFICATION`, `BING_SITE_VERIFICATION`: search console
-  ownership meta tags.
-- `NODE_IMAGE`, `NGINX_IMAGE`: the base images.
-
-App Platform environment variables reach only the running container, not the build. So change a
-default in the `Dockerfile` itself. Verification codes are public anyway, since every page's `<head>`
-shows them. If the builder cannot pull from Docker Hub, switch the base images to Timeweb's mirror:
-`dockerhub.timeweb.cloud/library/node:24-slim` and `dockerhub.timeweb.cloud/library/nginx:1.27-alpine`.
-
-The nginx config serves precompressed `.gz` files and caches hashed assets for a year. It redirects
-`/docs/x` and `/docs/x/index.html` to `/docs/x/`, so each page has one URL. It serves `llms.txt` and
-the `/docs/<page>.md` Markdown twins as text, and answers `/healthz`. For Apache hosting, use
-`apps/site/public/.htaccess` instead.
+For full control, deploy the root `Dockerfile` as a backend app instead. Its nginx config
+(`deploy/nginx.conf`) serves the precompressed files and caches hashed assets for a year. It also
+returns real 404s and redirects `/docs/x` and `/docs/x/index.html` to `/docs/x/`. The container listens on port
+8080, with the health check at `/healthz`. Build settings are Docker build arguments in the
+`Dockerfile` (`SITE_URL`, the verification codes, `NODE_IMAGE`, `NGINX_IMAGE`). If the builder cannot
+pull from Docker Hub, use Timeweb's mirror, `dockerhub.timeweb.cloud/library/...`. For Apache hosting,
+use `apps/site/public/.htaccess`.
 
 Try the production image locally:
 

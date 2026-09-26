@@ -34,5 +34,6 @@
     "invalidLink": true,
     "notDocumented": true
   },
-  "treatValidationWarningsAsErrors": true
+  "treatValidationWarningsAsErrors": true,
+  "gitRevision": "main"
 }
