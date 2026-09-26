@@ -10,6 +10,16 @@ api: [SilkGraphics, conic]
 
 <Demo name="rings" height={240} />
 
+## Progress rings
+
+The demo draws each track with `circle()` and its progress with `arcSweep()`, using
+`conic()` for a gradient that spans the arc.
+
+The lab examples use a local `drawRing()` helper in `src/lab/_widgets/rings.ts`, which is
+not exported by `pixi-silk`. Its gradient stays fixed to one full turn. Zero progress draws
+a dot, and progress above 1 adds a lap in the final color, up to 2. The lab helper defines
+the ring appearance with a local `RingSpec`.
+
 ## Arcs
 
 ```ts nocheck
@@ -28,13 +38,17 @@ g.arcSweep(100, 100, 60, -Math.PI / 2, Math.PI * 2 * progress)
     .stroke({ width: 14, cap: 'round', color: 0x30d158 });
 ```
 
-A sweep of `2π` or more draws a full ring. The primitive is one exact distance field, so a ring is
-as cheap as a circle.
+A sweep of `2π` or more covers a full ring. `arcSweep()` preserves the extra turns, so the
+end keeps moving over the previous lap. Solid and gradient strokes with round caps automatically
+shade the previous lap beneath the overlapping tip. Dashed strokes do not add this shadow.
+`arc()` retains canvas semantics and stops at one turn. Each ring still uses one primitive.
+
 
 ## Gradients on arcs
 
 A `conic()` gradient on an arc spans that arc. Its start and sweep default to the arc's own. So the
-ramp always runs from the start cap to the end cap, however long the arc is.
+ramp runs from the start cap to the end cap. Short round arcs ease out of the first color
+until their length reaches one cap diameter (the stroke width). On overlapping turns, the latest lap is visible.
 
 ```ts
 const RING = conic([0xfa114f, 0xff5e8a]);

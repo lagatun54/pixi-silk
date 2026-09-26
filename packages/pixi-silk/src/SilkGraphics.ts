@@ -674,9 +674,9 @@ export class SilkGraphics extends Mesh<SilkGeometry, Shader> {
         return this.arcSweep(cx, cy, radius, startAngle, sweep);
     }
 
-    /** Open arc given start angle and signed sweep (positive = clockwise on screen). */
+    /** Open arc given start angle and signed sweep (positive = clockwise on screen). Sweeps may exceed one turn. */
     arcSweep(cx: number, cy: number, radius: number, startAngle: number, sweep: number): this {
-        sweep = Math.max(-TAU, Math.min(TAU, sweep));
+        sweep = Number.isFinite(sweep) ? sweep : 0;
         const k = this._k;
 
         return this._begin({
