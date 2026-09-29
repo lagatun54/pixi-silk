@@ -42,7 +42,7 @@ export interface GradientOptions {
     space?: ColorSpace;
     /** How the ramp moves between stops. Default `linear`. */
     easing?: Easing;
-    /** Portion of the colour ramp to sample, before easing. Endpoints are in 0..1. Default `[0, 1]`. */
+    /** Portion of the colour ramp to sample, before easing. Endpoints are clamped to 0..1. Non-finite values reset to `[0, 1]`. */
     range?: [number, number];
     /** What the gradient does outside 0..1. Default `pad`. */
     extend?: ExtendMode;
@@ -151,7 +151,12 @@ export abstract class Gradient {
         this.stops = normalizeStops(options.stops);
         this.space = options.space ?? 'oklab';
         this.easing = options.easing ?? 'linear';
-        this.range = options.range ? [...options.range] : [0, 1];
+        const range = options.range;
+
+        this.range =
+            range && Number.isFinite(range[0]) && Number.isFinite(range[1])
+                ? [Math.min(1, Math.max(0, range[0])), Math.min(1, Math.max(0, range[1]))]
+                : [0, 1];
         this.extend = options.extend ?? 'pad';
         this.units = options.units ?? 'shape';
 

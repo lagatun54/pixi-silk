@@ -302,14 +302,6 @@ float dashSD(float u, float v, float L, float hw, int cap, bool closed)
     return best;
 }
 
-bool isGradientAlignedWithArc()
-{
-    return int(vMeta.x + 0.5) == 2
-        && all(equal(vGrad.xy, vShape0.xy))
-        && vGrad.z == vShape0.w
-        && vGrad.w == vShape1.x;
-}
-
 vec4 rampColor(float t)
 {
     int ext = int(vPaint.z + 0.5);
@@ -322,20 +314,27 @@ vec4 rampColor(float t)
 // x: end-cap coverage, y: occlusion of the earlier stroke beneath it.
 // Resolve ownership from the nearest earlier point on the path, including its
 // start cap when the projected point lies before the start of the arc.
-vec2 arcTipOverlap(vec2 q, float r, float start, float sweep, float hw)
+vec2 arcTipOverlap(vec2 q, float r, float start, float sweep, float hw, bool shadow)
 {
     float e = start + sweep, s = sign(sweep);
     vec2 v = vec2(cos(e), sin(e)), p = q - r * v;
+    float a = length(p);
     if (s == 0.0 || dot(p, s * vec2(-v.y, v.x)) < 0.0) return vec2(0.0);
 
+    // Ownership of the gradient end colour can extend beyond the shadow's reach.
+    if (shadow && a >= 2.0 * hw) return vec2(0.0);
+
     bool onArc = mod((e - atan(q.y, q.x)) * s, TAU) <= abs(sweep);
-    float a = length(p);
     float b = onArc ? abs(length(q) - r) : length(q - r * vec2(cos(start), sin(start)));
     if (!onArc && b >= a) return vec2(0.0);
 
+    float tip = cover(a - hw);
+    if (!shadow) return vec2(tip, 0.0);
+
     float k = hw / max(a, hw), c = cover(b - hw);
-    return vec2(cover(a - hw),
-        (1.0 - sqrt(max(1.0 - k * k, 0.0))) * min(c / 1e-9, 1.0));
+    float fade = 1.0 - smoothstep(hw, 2.0 * hw, a);
+    return vec2(tip,
+        (1.0 - sqrt(max(1.0 - k * k, 0.0))) * step(1e-9, c) * fade);
 }
 
 // Decorative occlusion is independent of arc geometry and paint selection.
@@ -363,7 +362,7 @@ vec4 gradientColor(vec2 p, float u, float L, int kind, int cap, float hw)
         float sw = vGrad.w;
         float as = max(abs(sw), 1e-9);
         bool partialArc = as < TAU - 1e-4;
-        bool alignedArc = isGradientAlignedWithArc();
+        bool alignedArc = (int(vMeta.y + 0.5) & 16384) != 0;
         bool padRoundCaps = cap == 1 && int(vPaint.z + 0.5) == 0;
         float rel = mod((atan(q.y, q.x) - vGrad.z) * (sw < 0.0 ? -1.0 : 1.0), TAU);
         // keep the region right before the start on the start color (round caps)
@@ -463,7 +462,10 @@ void main(void)
             u = (h - (sweep < 0.0 ? -1.0 : 1.0) * atan(qr.x, qr.y)) * r;
             L = 2.0 * h * r;
             if (full) u = mod((atan(q.y, q.x) - vShape0.w) * sign(sweep), TAU) * r;
-            if (!dashed && cap0 == 1) tipOverlap = arcTipOverlap(q, r, vShape0.w, sweep, hwEff);
+            // Only crossing aligned gradients need end-cap colour ownership without a shadow.
+            bool tipShadow = vPaint.w > 0.5;
+            if (tipShadow || (flags & 32768) != 0)
+                tipOverlap = arcTipOverlap(q, r, vShape0.w, sweep, hwEff, tipShadow);
             float v = abs(len - r);
             if (dashed) sd = dashSD(u, v, L, hwEff, cap0, full);
             else if (full) sd = v - hwEff;
@@ -575,7 +577,7 @@ void main(void)
         if ((flags & 4096) != 0)
         {
             strokeCol *= g;
-            tipCol = gk == 3 && isGradientAlignedWithArc() ? vStroke * rampColor(1.0) : strokeCol;
+            tipCol = gk == 3 && (flags & 16384) != 0 ? vStroke * rampColor(1.0) : strokeCol;
         }
         else fillCol *= g;
     }
